@@ -254,3 +254,49 @@ def get_today_logs(credentials: HTTPAuthorizationCredentials = Depends(security)
         raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# ส่วนที่ 5: ระบบจัดการฐานข้อมูลอาหาร (Admin)
+# ==========================================
+
+# Model รับข้อมูลเพิ่มอาหาร
+class FoodRequest(BaseModel):
+    food_name: str
+    calories: str
+
+# 1. API เพิ่มเมนูอาหารใหม่
+@app.post("/api/admin/foods")
+def add_food(food: FoodRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        # ยืนยันตัวตนว่าล็อกอินอยู่ (อนาคตสามารถเพิ่มโค้ดเช็ก role_id ว่าเป็น admin ได้ตรงนี้)
+        SECRET_KEY = os.getenv("SECRET_KEY")
+        jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+
+        # บันทึกเมนูใหม่ลงตาราง Foods
+        data = {
+            "food_name": food.food_name,
+            "calories": food.calories
+        }
+        result = supabase.table("Foods").insert(data).execute()
+        return {"message": "เพิ่มเมนูอาหารสำเร็จ", "data": result.data}
+        
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. API ลบเมนูอาหาร
+@app.delete("/api/admin/foods/{target_food_id}")
+def delete_food(target_food_id: int, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        SECRET_KEY = os.getenv("SECRET_KEY")
+        jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+        
+        # ลบข้อมูลตาม food_id
+        result = supabase.table("Foods").delete().eq("food_id", target_food_id).execute()
+        return {"message": f"ลบเมนูอาหารรหัส {target_food_id} สำเร็จเรียบร้อย"}
+        
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
