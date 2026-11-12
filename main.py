@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
 from ultralytics import YOLO
 from PIL import Image
 import io
@@ -15,6 +15,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI(title="My Nutrition Secretary API")
+
+# เปิดใช้งาน CORS (อนุญาตให้แอป Flutter หรือหน้าเว็บยิง API เข้ามาได้โดยไม่ติดบล็อก)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # อนุญาตทุกโดเมน (หรือจะระบุเฉพาะ IP ตอนขึ้นระบบจริงก็ได้)
+    allow_credentials=True,
+    allow_methods=["*"],  # อนุญาตทุก Method (GET, POST, PUT, DELETE)
+    allow_headers=["*"],  # อนุญาตทุก Header
+)
+
+# 1. เชื่อมต่อ Supabase และโหลดโมเดล YOLO
+# ... (โค้ดเดิมด้านล่าง) ...
 
 # 1. เชื่อมต่อ Supabase และโหลดโมเดล YOLO
 SUPABASE_URL = os.getenv("SUPABASE_URL")
