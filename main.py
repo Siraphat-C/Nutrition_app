@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
 from ultralytics import YOLO
 from PIL import Image
 import io
@@ -191,3 +192,65 @@ async def analyze_food(file: UploadFile = File(...)):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+# ==========================================
+# ส่วนที่ 4: ระบบบันทึกประวัติการกิน (Food Logs)
+# ==========================================
+
+# 1. สร้าง Model รับข้อมูลจากแอป Flutter
+class FoodLogRequest(BaseModel):
+    food_id: int
+    meal_type: str  # เช่น 'breakfast', 'lunch', 'dinner', 'snack'
+
+security = HTTPBearer()
+
+# 2. API สำหรับบันทึกมื้ออาหาร
+@app.post("/api/logs")
+def create_food_log(log: FoodLogRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        # ถอดรหัส Token เพื่อดึง user_id ของคนที่กำลังใช้งาน
+        SECRET_KEY = os.getenv("SECRET_KEY")
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+        user_id = payload.get("user_id") # ดึง user_id จาก token
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Token ไม่สมบูรณ์ ไม่มี user_id")
+
+        # บันทึกลงตาราง food_logs
+        data = {
+            "user_id": user_id,
+            "food_id": log.food_id,
+            "meal_type": log.meal_type
+        }
+        result = supabase.table("food_logs").insert(data).execute()
+        return {"message": "บันทึกมื้ออาหารสำเร็จ", "data": result.data}
+        
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ โปรดล็อกอินใหม่")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 3. API สำหรับดึงประวัติการกินของ "วันนี้"
+@app.get("/api/logs/today")
+def get_today_logs(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        SECRET_KEY = os.getenv("SECRET_KEY")
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+        user_id = payload.get("user_id")
+
+        # ดึงวันที่ปัจจุบัน (เอาแค่ ปี-เดือน-วัน)
+        today = datetime.now(timezone.utc).astimezone().date().isoformat()
+        
+        # ดึงข้อมูลการกินของวันนี้ พร้อมดึงชื่อและแคลอรีจากตาราง Foods มาด้วย (Join table)
+        result = supabase.table("food_logs") \
+            .select("log_id, meal_type, logged_at, Foods(food_name, calories)") \
+            .eq("user_id", user_id) \
+            .gte("logged_at", f"{today}T00:00:00+07:00") \
+            .execute()
+            
+        return {"message": "ดึงข้อมูลสำเร็จ", "data": result.data}
+        
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
