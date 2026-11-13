@@ -1,4 +1,4 @@
-import 'package:material_ui/material_ui.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:camera/camera.dart';
@@ -27,7 +27,6 @@ Future<void> main() async {
   try {
     cameras = await availableCameras();
   } catch (_) {
-    // อุปกรณ์นี้ไม่มีกล้อง หรือไม่สามารถเข้าถึงกล้องได้ (เช่น รันบน emulator บางชนิด)
     cameras = [];
   }
   runApp(const NutritionApp());
@@ -59,11 +58,10 @@ class AppContent extends ChangeNotifier {
   };
 
   final List<StringMap> foods = [
-    {'name': 'ข้าวมันไก่ต้ม', 'energy': '590', 'status': 'เทรนโมเดลเสร็จแล้ว (พร้อมใช้งาน)', 'source': 'admin'},
-    {'name': 'สุกี้น้ำรวมมิตร', 'energy': '320', 'status': 'เทรนโมเดลเสร็จแล้ว (พร้อมใช้งาน)', 'source': 'admin'},
+    {'name': 'ข้าวมันไก่ต้ม', 'engName': 'Khao_mun_gai', 'energy': '590', 'source': 'admin'},
+    {'name': 'สุกี้น้ำรวมมิตร', 'engName': 'Suki_nam_ruam_mit', 'energy': '320', 'source': 'admin'},
   ];
 
-  // ประวัติมื้ออาหารแยกตามวันที่ (yyyy-MM-dd)
   final Map<String, List<DynamicMap>> mealsByDate = {};
 
   DateTime selectedDate = DateTime.now();
@@ -75,7 +73,8 @@ class AppContent extends ChangeNotifier {
   String gender = 'หญิง';
   String activityLevel = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
   String goalType = 'รักษาน้ำหนัก';
-  double dailyGoal = 1900.0;
+  
+  double get dailyGoal => calculateRecommendedTDEE();
 
   AppContent() {
     final todayKey = dateKey(DateTime.now());
@@ -108,25 +107,24 @@ class AppContent extends ChangeNotifier {
   }
 
   double calculateRecommendedTDEE({String? forGoal, String? forActivity}) {
-    final String activityLevel = forActivity ?? this.activityLevel;
-    final String goalType = forGoal ?? this.goalType;
+    final String actLevel = forActivity ?? activityLevel;
+    final String gType = forGoal ?? goalType;
     final double bmr = gender == 'ชาย'
         ? (10 * weightKg) + (6.25 * heightCm) - (5 * age) + 5
         : (10 * weightKg) + (6.25 * heightCm) - (5 * age) - 161;
 
     double multiplier = 1.375;
-    if (activityLevel.contains('น้อย')) multiplier = 1.2;
-    if (activityLevel.contains('ปานกลาง')) multiplier = 1.55;
-    if (activityLevel.contains('หนัก')) multiplier = 1.725;
+    if (actLevel.contains('น้อย')) multiplier = 1.2;
+    if (actLevel.contains('ปานกลาง')) multiplier = 1.55;
+    if (actLevel.contains('หนัก')) multiplier = 1.725;
 
     double tdee = bmr * multiplier;
-    if (goalType.contains('ลดน้ำหนัก')) tdee -= 400;
-    if (goalType.contains('เพิ่มน้ำหนัก')) tdee += 400;
+    if (gType.contains('ลดน้ำหนัก')) tdee -= 400;
+    if (gType.contains('เพิ่มน้ำหนัก')) tdee += 400;
 
     return tdee.clamp(1200, 4000).roundToDouble();
   }
 
-  // เริ่มบัญชีใหม่จากข้อมูลที่ผู้ใช้กรอกตอนสมัครสมาชิก (ล้างค่าตัวอย่างเดิมทิ้งทั้งหมด)
   void startNewAccount({required String name, required String newEmail}) {
     fullName = name;
     email = newEmail;
@@ -136,7 +134,6 @@ class AppContent extends ChangeNotifier {
     gender = 'หญิง';
     activityLevel = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
     goalType = 'รักษาน้ำหนัก';
-    dailyGoal = 0;
     mealsByDate.clear();
     selectedDate = DateTime.now();
     notifyListeners();
@@ -164,14 +161,12 @@ class AppContent extends ChangeNotifier {
     String? userGender,
     String? activity,
     String? targetType,
-    double? goal,
   }) {
     if (weight != null) weightKg = weight;
     if (height != null) heightCm = height;
     if (userGender != null) gender = userGender;
     if (activity != null) activityLevel = activity;
     if (targetType != null) goalType = targetType;
-    if (goal != null) dailyGoal = goal;
     notifyListeners();
   }
 
@@ -205,6 +200,13 @@ class AppContent extends ChangeNotifier {
   void addFood(StringMap foodData) {
     foods.add(foodData);
     notifyListeners();
+  }
+
+  void updateFoodAt(int index, StringMap newFoodData) {
+    if (index >= 0 && index < foods.length) {
+      foods[index] = newFoodData;
+      notifyListeners();
+    }
   }
 
   void deleteFoodAt(int index) {
@@ -271,6 +273,7 @@ class _NutritionAppState extends State<NutritionApp> {
             '/admin/users/edit': (_) => const AdminEditUserScreen(),
             '/admin/foods': (_) => const AdminFoodsScreen(),
             '/admin/foods/add': (_) => const AdminAddFoodScreen(),
+            '/admin/foods/edit': (_) => const AdminEditFoodScreen(),
           },
         ),
       ),
@@ -407,7 +410,6 @@ class CleanTextField extends StatelessWidget {
   }
 }
 
-// ข้อความแจ้งเตือนข้อผิดพลาดของฟอร์ม (ใช้ร่วมกันหลายหน้า เช่น สมัครสมาชิก, เพิ่มอาหาร)
 class FieldError extends StatelessWidget {
   final String message;
   const FieldError(this.message, {super.key});
@@ -571,7 +573,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   String? _emailError;
   String? _passwordError;
 
-  // รูปแบบอีเมลพื้นฐาน: ต้องมี local-part @ domain.tld
   static final RegExp _emailRegex = RegExp(r'^[\w\.\+\-]+@[\w\-]+\.[\w\.\-]+$');
 
   @override
@@ -896,7 +897,6 @@ class GoalScreen extends StatefulWidget {
 }
 
 class _GoalScreenState extends State<GoalScreen> {
-  final _calorieCtrl = TextEditingController();
   String _selectedTarget = 'รักษาน้ำหนัก';
   String _selectedActivity = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
   bool _initialized = false;
@@ -913,15 +913,6 @@ class _GoalScreenState extends State<GoalScreen> {
     'หนัก (ออกกำลังกายหนักทุกวัน)',
   ];
 
-  final List<int> _caloriePresets = [
-    1500,
-    1700,
-    1900,
-    2100,
-    2300,
-    2500,
-  ];
-
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -932,37 +923,21 @@ class _GoalScreenState extends State<GoalScreen> {
       _selectedActivity = _activityOptions.contains(context.content.activityLevel)
           ? context.content.activityLevel
           : _activityOptions[1];
-      final savedGoal = context.content.dailyGoal;
-      _calorieCtrl.text = (savedGoal > 0
-              ? savedGoal
-              : context.content.calculateRecommendedTDEE(
-                  forGoal: _selectedTarget,
-                  forActivity: _selectedActivity,
-                ))
-          .toStringAsFixed(0);
       _initialized = true;
     }
   }
 
-  @override
-  void dispose() {
-    _calorieCtrl.dispose();
-    super.dispose();
-  }
-
   void _updateAutoRecommendation() {
-    context.content.updateHealthProfile(
-      targetType: _selectedTarget,
-      activity: _selectedActivity,
-    );
-    final rec = context.content.calculateRecommendedTDEE();
-    setState(() {
-      _calorieCtrl.text = rec.toStringAsFixed(0);
-    });
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    final calculatedGoal = context.content.calculateRecommendedTDEE(
+      forGoal: _selectedTarget,
+      forActivity: _selectedActivity,
+    );
+
     return Scaffold(
       appBar: const CleanAppBar(title: 'เป้าหมายของคุณ'),
       body: GestureDetector(
@@ -1000,77 +975,36 @@ class _GoalScreenState extends State<GoalScreen> {
                   }
                 },
               ),
-              const SizedBox(height: 16),
-
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: const [
-                  Text('เป้าหมายพลังงานต่อวัน', style: TextStyle(fontWeight: FontWeight.bold, color: kInk)),
-                ],
-              ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 24),
 
               Container(
-                padding: const EdgeInsets.only(left: 18, right: 8),
+                padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: kGreenBg,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: kBorder, width: 1.5),
+                  border: Border.all(color: kGreen.withValues(alpha: 0.3)),
                 ),
-                child: Row(
+                child: Column(
                   children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _calorieCtrl,
-                        keyboardType: TextInputType.number,
-                        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: kInk),
-                        decoration: const InputDecoration(
-                          hintText: 'กรอกแคลอรี เช่น 1850',
-                          hintStyle: TextStyle(color: kMuted, fontSize: 14, fontWeight: FontWeight.normal),
-                          border: InputBorder.none,
-                          suffixText: 'กิโลแคลอรี / วัน',
-                          suffixStyle: TextStyle(color: kMuted, fontSize: 13),
-                        ),
-                      ),
+                    const Text('พลังงานที่แนะนำสำหรับคุณ', style: TextStyle(fontSize: 14, color: kMuted, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${calculatedGoal.toStringAsFixed(0)} kcal / วัน',
+                      style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: kGreenDark),
                     ),
-                    PopupMenuButton<int>(
-                      tooltip: 'เลือกค่าแคลอรีแนะนำ',
-                      icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
-                      color: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                      onSelected: (val) {
-                        setState(() {
-                          _calorieCtrl.text = val.toString();
-                        });
-                      },
-                      itemBuilder: (context) => _caloriePresets
-                          .map((cal) => PopupMenuItem<int>(
-                                value: cal,
-                                child: Text(
-                                  '$cal กิโลแคลอรี / วัน',
-                                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: kInk),
-                                ),
-                              ))
-                          .toList(),
-                    ),
+                    const SizedBox(height: 8),
+                    const Text('ระบบคำนวณให้จากเป้าหมายและระดับกิจกรรมของคุณอัตโนมัติ', 
+                        textAlign: TextAlign.center, 
+                        style: TextStyle(fontSize: 11, color: kMuted)),
                   ],
                 ),
               ),
 
               const Spacer(),
               PrimaryButton('บันทึกและเสร็จสิ้น', () {
-                final parsedGoal = double.tryParse(_calorieCtrl.text.trim());
-                if (parsedGoal == null || parsedGoal <= 0) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('กรุณากรอกเป้าหมายพลังงานให้ถูกต้อง'), backgroundColor: kRed),
-                  );
-                  return;
-                }
                 context.content.updateHealthProfile(
                   targetType: _selectedTarget,
                   activity: _selectedActivity,
-                  goal: parsedGoal,
                 );
                 Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
               }),
@@ -1140,8 +1074,6 @@ class DashboardScreen extends StatelessWidget {
       body: RefreshIndicator(
         color: kGreen,
         onRefresh: () async {
-          // จำลองการดึงข้อมูลล่าสุด (มื้ออาหาร/เป้าหมาย) จากเซิร์ฟเวอร์
-          // TODO: เมื่อเชื่อมต่อ API จริง ให้แทนที่ด้วยการเรียก fetch ข้อมูลผู้ใช้/มื้ออาหารใหม่จากเซิร์ฟเวอร์ แล้วอัปเดต context.content
           await Future.delayed(const Duration(milliseconds: 800));
         },
         child: ListView(
@@ -1340,24 +1272,6 @@ class DashboardScreen extends StatelessWidget {
                           ],
                         ),
                       ),
-                      IconButton(
-                        tooltip: 'กินซ้ำ',
-                        icon: const Icon(Icons.add_circle_outline, color: kGreen, size: 22),
-                        onPressed: () {
-                          context.content.logMeal(
-                            name: meal['name'] as String,
-                            calories: meal['calories'] as double,
-                          );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('บันทึก "${meal['name']}" ซ้ำเรียบร้อย'), backgroundColor: kGreen),
-                          );
-                        },
-                      ),
-                      IconButton(
-                        tooltip: 'ลบรายการ',
-                        icon: const Icon(Icons.delete_outline, color: kRed, size: 22),
-                        onPressed: () => context.content.deleteMeal(meal['id'] as String),
-                      ),
                     ],
                   ),
                 )),
@@ -1436,7 +1350,6 @@ class _CaptureScreenState extends State<CaptureScreen> {
   Future<void> _capturePhoto() async {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized || _isCapturing) {
-      // ไม่มีกล้องจริงบนอุปกรณ์นี้ (เช่น รันบนเว็บ/เดสก์ท็อป) ยังพาไปหน้าผลวิเคราะห์เพื่อให้ทดสอบ flow ต่อได้
       Navigator.pushNamed(context, '/analysis');
       return;
     }
@@ -1444,7 +1357,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
     try {
       final file = await controller.takePicture();
       final imageBytes = await file.readAsBytes();
-      if (mounted) Navigator.pushNamed(context, '/analysis', arguments: imageBytes);
+      if (mounted) {
+        Navigator.pushNamed(context, '/analysis', arguments: imageBytes);
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1578,8 +1493,6 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
   }
 
   Future<void> _startAnalysis() async {
-    // จำลองเวลาที่โมเดล AI ใช้วิเคราะห์ภาพอาหาร
-    // TODO: เมื่อเชื่อมต่อ API จริง ให้แทนที่ Future.delayed นี้ด้วยการเรียกโมเดล/บริการวิเคราะห์ภาพจริง
     await Future.delayed(const Duration(milliseconds: 1800));
     if (mounted) setState(() => _isAnalyzing = false);
   }
@@ -1611,7 +1524,6 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
     },
   ];
 
-  // แก้ไขผลวิเคราะห์ของ AI ที่กำลังเลือกอยู่ เผื่อกรณีที่ AI ทายชื่อ/แคลอรีผิด
   void _showCustomFoodDialog() {
     final currentFood = _aiPredictions[_selectedMenuIndex];
     final nameCtrl = TextEditingController(text: currentFood['name'] as String);
@@ -1638,7 +1550,6 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
             if (nameError != null || calError != null) return;
 
             setState(() {
-              // แก้ไขรายการที่เลือกอยู่แทนที่จะเพิ่มรายการใหม่ เพื่อแก้ผลทำนายของ AI ที่ผิดพลาด
               _aiPredictions[_selectedMenuIndex] = {
                 ..._aiPredictions[_selectedMenuIndex],
                 'name': customName,
@@ -2265,7 +2176,6 @@ class ProfileScreen extends StatelessWidget {
               'ส่วนสูง': c.heightCm > 0 ? '${c.heightCm.toStringAsFixed(0)} เซนติเมตร' : '--',
               'อายุ': c.birthDate == null ? '--' : '${c.age} ปี',
               'เป้าหมายสุขภาพ': c.goalType,
-              'เป้าหมายพลังงาน': c.dailyGoal > 0 ? '${c.dailyGoal.toStringAsFixed(0)} kcal / วัน' : '--',
               'ระดับกิจกรรม': c.activityLevel,
             },
           ),
@@ -2323,7 +2233,7 @@ class _InfoCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              ?trailingAction,
+              if (trailingAction != null) trailingAction!,
             ],
           ),
           const SizedBox(height: 16),
@@ -2621,7 +2531,7 @@ class _UserCard extends StatelessWidget {
   }
 }
 
-// ───────────────────────── 12. Admin Foods (Model Training Status) ─────────────────────────
+// ───────────────────────── 12. Admin Foods ─────────────────────────
 class AdminFoodsScreen extends StatelessWidget {
   const AdminFoodsScreen({super.key});
 
@@ -2666,7 +2576,6 @@ class AdminFoodsScreen extends StatelessWidget {
           else
             ...List.generate(foodList.length, (index) {
             final item = foodList[index];
-            final isReady = (item['status'] ?? '').contains('เสร็จแล้ว');
             return Container(
               margin: const EdgeInsets.only(bottom: 12),
               padding: const EdgeInsets.all(16),
@@ -2687,30 +2596,42 @@ class AdminFoodsScreen extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(item['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                        const SizedBox(height: 4),
+                        Text(item['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: kInk)),
+                        if (item['engName'] != null && item['engName']!.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(item['engName']!, style: const TextStyle(fontSize: 12, color: kMuted, fontStyle: FontStyle.italic)),
+                        ],
+                        const SizedBox(height: 6),
                         Text(
                           'พลังงาน ${item['energy']} kcal',
-                          style: const TextStyle(fontSize: 12, color: kMuted),
-                        ),
-                        const SizedBox(height: 4),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isReady ? kGreenBg : kRedBg,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            item['status'] ?? 'เทรนโมเดลเสร็จแล้ว (พร้อมใช้งาน)',
-                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isReady ? kGreenDark : kRed),
-                          ),
+                          style: const TextStyle(fontSize: 13, color: kGreenDark, fontWeight: FontWeight.bold),
                         ),
                       ],
                     ),
                   ),
+                  // ปุ่มลบ
                   IconButton(
                     icon: const Icon(Icons.delete_outline, color: kRed),
-                    onPressed: () => context.content.deleteFoodAt(index),
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('ยืนยันการลบ'),
+                          content: Text('ต้องการลบเมนู "${item['name']}" หรือไม่?'),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ยกเลิก', style: TextStyle(color: kMuted))),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(backgroundColor: kRed),
+                              onPressed: () {
+                                context.content.deleteFoodAt(index);
+                                Navigator.pop(ctx);
+                              },
+                              child: const Text('ลบ', style: TextStyle(color: Colors.white)),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -2722,7 +2643,7 @@ class AdminFoodsScreen extends StatelessWidget {
   }
 }
 
-// ───────────────────────── 13. Admin Add Food (Training Status Dropdown) ─────────────────────────
+// ───────────────────────── 13. Admin Add Food ─────────────────────────
 class AdminAddFoodScreen extends StatefulWidget {
   const AdminAddFoodScreen({super.key});
   @override
@@ -2731,26 +2652,30 @@ class AdminAddFoodScreen extends StatefulWidget {
 
 class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
   final _name = TextEditingController();
+  final _engName = TextEditingController();
   final _energy = TextEditingController();
-  String _trainingStatus = 'เทรนโมเดลเสร็จแล้ว (พร้อมใช้งาน)';
 
   String? _nameError;
+  String? _engNameError;
   String? _energyError;
 
   @override
   void dispose() {
     _name.dispose();
+    _engName.dispose();
     _energy.dispose();
     super.dispose();
   }
 
   bool _validate() {
     final name = _name.text.trim();
+    final engName = _engName.text.trim();
     final energyText = _energy.text.trim();
     final parsedEnergy = double.tryParse(energyText);
 
     setState(() {
-      _nameError = name.isEmpty ? 'กรุณากรอกชื่ออาหาร' : null;
+      _nameError = name.isEmpty ? 'กรุณากรอกชื่ออาหาร (ภาษาไทย)' : null;
+      _engNameError = engName.isEmpty ? 'กรุณากรอกชื่ออาหาร (ภาษาอังกฤษ)' : null;
       _energyError = energyText.isEmpty
           ? 'กรุณากรอกพลังงาน'
           : (parsedEnergy == null
@@ -2758,19 +2683,20 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
               : (parsedEnergy <= 0 ? 'พลังงานต้องมากกว่า 0' : null));
     });
 
-    return _nameError == null && _energyError == null;
+    return _nameError == null && _engNameError == null && _energyError == null;
   }
 
   void _save() {
     if (!_validate()) return;
 
     final name = _name.text.trim();
+    final engName = _engName.text.trim();
     final energy = _energy.text.trim();
 
     context.content.addFood({
       'name': name,
+      'engName': engName,
       'energy': energy,
-      'status': _trainingStatus,
       'source': 'admin',
     });
 
@@ -2801,34 +2727,11 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
                         style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: kInk),
                       ),
                       const SizedBox(height: 4),
-                      const Text('เพิ่มเมนูใหม่หลังจากเทรนโมเดลเรียบร้อยแล้ว', style: TextStyle(color: kMuted, fontSize: 13)),
+                      const Text('เพิ่มข้อมูลเมนูอาหารใหม่เข้าสู่ระบบ', style: TextStyle(color: kMuted, fontSize: 13)),
                       const SizedBox(height: 28),
-                      _FoodField(label: 'ชื่ออาหาร', hint: 'กรอกชื่ออาหาร', controller: _name, errorText: _nameError),
+                      _FoodField(label: 'ชื่ออาหาร (ภาษาไทย)', hint: 'เช่น ข้าวมันไก่ต้ม', controller: _name, errorText: _nameError),
+                      _FoodField(label: 'ชื่ออาหาร (ภาษาอังกฤษ)', hint: 'เช่น Khao_mun_gai', controller: _engName, errorText: _engNameError),
                       _FoodField(label: 'พลังงาน (กิโลแคลอรี)', hint: '0', controller: _energy, numeric: true, errorText: _energyError),
-                      const Text('สถานะโมเดล AI', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: kInk)),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: kBorder, width: 1.5),
-                        ),
-                        child: DropdownButtonHideUnderline(
-                          child: DropdownButton<String>(
-                            value: _trainingStatus,
-                            isExpanded: true,
-                            icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
-                            items: const [
-                              'เทรนโมเดลเสร็จแล้ว (พร้อมใช้งาน)',
-                              'รออัปเดตน้ำหนักโมเดล (ฉบับร่าง)',
-                            ].map((s) => DropdownMenuItem(value: s, child: Text(s, style: const TextStyle(fontSize: 13, color: kInk)))).toList(),
-                            onChanged: (val) {
-                              if (val != null) setState(() => _trainingStatus = val);
-                            },
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -2869,6 +2772,166 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
                           ),
                           onPressed: _save,
                           child: const Text('บันทึกข้อมูล', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ───────────────────────── 13.5 Admin Edit Food (แก้ไขเมนู) ─────────────────────────
+class AdminEditFoodScreen extends StatefulWidget {
+  const AdminEditFoodScreen({super.key});
+  @override
+  State<AdminEditFoodScreen> createState() => _AdminEditFoodScreenState();
+}
+
+class _AdminEditFoodScreenState extends State<AdminEditFoodScreen> {
+  final _name = TextEditingController();
+  final _engName = TextEditingController();
+  final _energy = TextEditingController();
+
+  String? _nameError;
+  String? _engNameError;
+  String? _energyError;
+  
+  int _foodIndex = -1;
+  bool _initialized = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_initialized) {
+      final idx = ModalRoute.of(context)?.settings.arguments as int?;
+      if (idx != null) {
+        _foodIndex = idx;
+        final foodData = context.content.adminFoods[_foodIndex];
+        _name.text = foodData['name'] ?? '';
+        _engName.text = foodData['engName'] ?? '';
+        _energy.text = foodData['energy'] ?? '';
+      }
+      _initialized = true;
+    }
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _engName.dispose();
+    _energy.dispose();
+    super.dispose();
+  }
+
+  bool _validate() {
+    final name = _name.text.trim();
+    final engName = _engName.text.trim();
+    final energyText = _energy.text.trim();
+    final parsedEnergy = double.tryParse(energyText);
+
+    setState(() {
+      _nameError = name.isEmpty ? 'กรุณากรอกชื่ออาหาร (ภาษาไทย)' : null;
+      _engNameError = engName.isEmpty ? 'กรุณากรอกชื่ออาหาร (ภาษาอังกฤษ)' : null;
+      _energyError = energyText.isEmpty
+          ? 'กรุณากรอกพลังงาน'
+          : (parsedEnergy == null
+              ? 'พลังงานต้องเป็นตัวเลขเท่านั้น'
+              : (parsedEnergy <= 0 ? 'พลังงานต้องมากกว่า 0' : null));
+    });
+
+    return _nameError == null && _engNameError == null && _energyError == null;
+  }
+
+  void _save() {
+    if (!_validate() || _foodIndex < 0) return;
+
+    final name = _name.text.trim();
+    final engName = _engName.text.trim();
+    final energy = _energy.text.trim();
+
+    context.content.updateFoodAt(_foodIndex, {
+      'name': name,
+      'engName': engName,
+      'energy': energy,
+      'source': 'admin',
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('แก้ไขข้อมูลโภชนาการอาหารสำเร็จ'), backgroundColor: kGreen),
+    );
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => FocusScope.of(context).unfocus(),
+          child: Column(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(24, 28, 24, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'แก้ไขข้อมูลอาหาร',
+                        style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: kInk),
+                      ),
+                      const SizedBox(height: 28),
+                      _FoodField(label: 'ชื่ออาหาร (ภาษาไทย)', hint: 'เช่น ข้าวมันไก่ต้ม', controller: _name, errorText: _nameError),
+                      _FoodField(label: 'ชื่ออาหาร (ภาษาอังกฤษ)', hint: 'เช่น Khao_mun_gai', controller: _engName, errorText: _engNameError),
+                      _FoodField(label: 'พลังงาน (กิโลแคลอรี)', hint: '0', controller: _energy, numeric: true, errorText: _energyError),
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: SizedBox(
+                        height: 52,
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            side: const BorderSide(color: kBorder, width: 1.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                          ),
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('ยกเลิก', style: TextStyle(color: kInk, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Container(
+                        height: 52,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(26),
+                          boxShadow: [
+                            BoxShadow(color: kGreen.withValues(alpha: 0.35), blurRadius: 12, offset: const Offset(0, 4)),
+                          ],
+                        ),
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: kGreen,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
+                          ),
+                          onPressed: _save,
+                          child: const Text('บันทึกการแก้ไข', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                         ),
                       ),
                     ),
