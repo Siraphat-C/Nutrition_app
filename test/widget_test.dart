@@ -9,9 +9,9 @@ void main() {
   ) async {
     await tester.pumpWidget(const NutritionApp());
 
-    expect(find.text('วิเคราะห์โภชนาการ AI'), findsOneWidget);
+    expect(find.text('วิเคราะห์โภชนาการ'), findsOneWidget);
 
-    Navigator.of(tester.element(find.text('วิเคราะห์โภชนาการ AI')))
+    Navigator.of(tester.element(find.text('วิเคราะห์โภชนาการ')))
         .pushNamed('/health');
     await tester.pumpAndSettle();
 
