@@ -11,7 +11,6 @@ cryptography==50.0.2
 cycler==0.12.1
 deprecation==2.1.0
 dnspython==2.9.2
-ecdsa==0.19.2
 email-validator==2.3.0
 fastapi==0.162.5
 filelock==4.2.10
@@ -36,14 +35,12 @@ nvidia-ml-py==13.615.71
 opencv-python==5.0.0.93
 opentelemetry-api==1.45.2
 packaging==26.3
-passlib==1.7.4
 pillow==13.0.0
 polars==2.1.0
 polars-runtime-32==2.1.0
 postgrest==2.34.1
 propcache==0.5.4
 psutil==7.2.2
-pyasn1==0.6.5
 pycparser==3.12
 pydantic==2.14.3
 pydantic_core==2.50.4
@@ -51,11 +48,9 @@ PyJWT==2.15.1
 pyparsing==3.3.3
 python-dateutil==4.0.0
 python-dotenv==1.2.4
-python-jose==3.5.0
 python-multipart==0.0.33
 realtime==2.34.1
 requests==2.34.2
-rsa==4.9.1
 setuptools==84.2.1
 six==1.17.0
 starlette==1.10.0
@@ -64,9 +59,9 @@ supabase==2.34.1
 supabase-auth==2.34.1
 supabase-functions==2.34.1
 sympy==1.13.1
-torch==2.6.0+cu124
-torchaudio==2.6.0+cu124
-torchvision==0.21.0+cu124
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
 typing-inspection==0.4.5
 typing_extensions==4.16.0
 tzdata==2026.6
