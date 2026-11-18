@@ -38,12 +38,35 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## API
 
-ทุก endpoint ที่มี 🔒 ต้องส่ง header `Authorization: Bearer <access_token>` (ได้จาก `/api/login`)
+ทุก endpoint ที่มี 🔒 ต้องส่ง header `Authorization: Bearer <access_token>` (ได้จาก `data.access_token` ของ `/api/login`)
+ใน `/docs` API ถูกแบ่งเป็นหมวด: บัญชีผู้ใช้, ข้อมูลส่วนตัว, อาหาร, แอดมิน
+
+### รูปแบบผลลัพธ์
+
+ทุก API ที่สำเร็จตอบรูปแบบเดียวกัน
+```json
+{ "success": true, "message": "ข้อความภาษาไทย", "data": { ... } }
+```
+API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/users`) มี `total`, `limit`, `offset` เพิ่ม
+(`total` เป็น `null` ถ้าขอหน้าที่เกินจำนวนข้อมูล)
+
+ถ้าไม่สำเร็จจะได้ `{ "detail": "ข้อความภาษาไทย" }` พร้อมรหัส
+
+| รหัส | ความหมาย |
+|---|---|
+| 400 | ส่งข้อมูลไม่ครบหรือทำไม่ได้ (เช่น แอดมินลบตัวเอง) |
+| 401 | ยังไม่ล็อกอิน / token หมดอายุหรือถูกยกเลิก |
+| 403 | ไม่มีสิทธิ์ (ไม่ใช่แอดมิน) |
+| 404 | ไม่พบข้อมูล |
+| 409 | ข้อมูลซ้ำ (อีเมล, username, ชื่อเมนู) หรือลบไม่ได้เพราะถูกใช้อยู่ |
+| 413 | ไฟล์รูปใหญ่เกิน |
+| 422 | ข้อมูลผิดรูปแบบหรือเกินช่วงที่กำหนด |
+
 
 | Method | Path | สิทธิ์ | ใช้ทำอะไร |
 |---|---|---|---|
 | POST | `/api/register` | - | สมัครสมาชิก `{username, email, password}` (รหัสผ่าน 8–72 ตัว, ภาษาไทยไม่เกิน 24 ตัว) |
-| POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `access_token` |
+| POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `data.access_token` |
 | GET | `/api/me` | 🔒 | ข้อมูลบัญชี + โปรไฟล์ |
 | GET | `/api/profile` | 🔒 | ข้อมูลส่วนตัว + แคลอรี่ที่ควรได้รับต่อวัน |
 | PUT | `/api/profile` | 🔒 | แก้ข้อมูลส่วนตัว (ส่งเฉพาะฟิลด์ที่แก้) ระบบคำนวณเป้าหมายให้อัตโนมัติ |
@@ -53,9 +76,18 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | POST | `/api/analyze` | 🔒 | ส่งรูป (multipart field `file`, ไม่เกิน 10 MB) วิเคราะห์ชื่อเมนู |
 | POST | `/api/logs` | 🔒 | บันทึกมื้ออาหาร `{food_id, meal_type}` |
 | GET | `/api/logs/today` | 🔒 | ประวัติการกินวันนี้ (เวลาไทย) |
-| GET | `/api/admin/dashboard` | 🔒 admin | ทดสอบสิทธิ์แอดมิน |
+| GET | `/api/foods` | 🔒 | รายการเมนู ค้นหาด้วย `?q=` แบ่งหน้าด้วย `?limit=20&offset=0` |
+| GET | `/api/foods/{food_id}` | 🔒 | ดูเมนูเดียว |
+| POST | `/api/admin/login` | - | เข้าสู่ระบบหน้าจัดการ (บัญชีที่ไม่ใช่แอดมินได้ `403`) |
+| GET | `/api/admin/dashboard` | 🔒 admin | ข้อมูลแอดมิน + จำนวนผู้ใช้ แอดมิน และเมนูทั้งหมด |
+| GET | `/api/admin/users` | 🔒 admin | รายการบัญชี ค้นหา username/อีเมลด้วย `?q=` กรองสิทธิ์ด้วย `?role_id=1` |
+| GET | `/api/admin/users/{user_id}` | 🔒 admin | ดูบัญชีเดียว + โปรไฟล์ |
+| POST | `/api/admin/users` | 🔒 admin | เพิ่มบัญชี `{username, email, password, role_id}` |
+| PUT | `/api/admin/users/{user_id}` | 🔒 admin | แก้ไขบัญชี `{username, email, role_id, new_password}` (ส่งเฉพาะที่แก้) |
+| DELETE | `/api/admin/users/{user_id}` | 🔒 admin | ลบบัญชี (โปรไฟล์และประวัติการกินถูกลบตาม) |
 | POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู `{food_name, calories_per_100g}` (0–900 kcal ต่อ 100 กรัม) |
-| DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู |
+| PUT | `/api/admin/foods/{food_id}` | 🔒 admin | แก้ไขเมนู `{food_name, calories_per_100g}` (ส่งเฉพาะที่แก้) |
+| DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู (ถ้ามีผู้ใช้บันทึกเมนูนี้ไว้แล้วได้ `409`) |
 
 ### ข้อมูลส่วนตัว (`PUT /api/profile`)
 
@@ -94,7 +126,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 { "current_password": "old-pass", "new_password": "new-pass-123" }
 ```
 
-เมื่อเปลี่ยนรหัสผ่าน token เก่าทุกเครื่องจะใช้ไม่ได้ และ API จะส่ง `access_token` ใหม่กลับมา
+เมื่อเปลี่ยนรหัสผ่าน token เก่าทุกเครื่องจะใช้ไม่ได้ และ API จะส่ง `data.access_token` ใหม่กลับมา
 แอปต้องเก็บ token ใหม่นี้แทนตัวเดิม
 
 ### ออกจากระบบ (`POST /api/logout`)
@@ -108,6 +140,12 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 - `002_add_token_version.sql` เพิ่มระบบออกจากระบบ
 - `003_calories_only.sql` ตัดโปรตีน คาร์บ ไขมัน ออก เหลือแค่แคลอรี่
+
+### ข้อจำกัดของแอดมิน
+
+- แอดมินลดสิทธิ์ตัวเองหรือลบบัญชีตัวเองไม่ได้ (กันไม่ให้ไม่มีใครเข้าหน้าจัดการได้)
+- แอดมินรีเซ็ตรหัสผ่านให้ใคร คนนั้นจะถูกออกจากระบบทุกเครื่อง
+- เปลี่ยนสิทธิ์ (`role_id`) มีผลทันทีกับ token ที่ใช้อยู่
 
 ## ความปลอดภัย
 

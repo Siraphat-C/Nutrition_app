@@ -4,19 +4,19 @@ import os
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 import bcrypt
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Path as PathParam, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Path as PathParam, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from PIL import Image, UnidentifiedImageError
 from postgrest.exceptions import APIError
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field
 from supabase import Client, create_client
 from ultralytics import YOLO
 
@@ -55,6 +55,8 @@ if len(SECRET_KEY) < 32:
         "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
     )
 
+ADMIN_ROLE_ID = 1
+USER_ROLE_ID = 2
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 LOCAL_TZ = ZoneInfo("Asia/Bangkok")
@@ -64,7 +66,14 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 # ระบุโดเมนใน .env ได้ เช่น CORS_ORIGINS=http://localhost:3000,https://example.com
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
 
-app = FastAPI(title="My Nutrition Secretary API")
+OPENAPI_TAGS = [
+    {"name": "บัญชีผู้ใช้", "description": "สมัครสมาชิก เข้าสู่ระบบ แก้ไขบัญชี ออกจากระบบ"},
+    {"name": "ข้อมูลส่วนตัว", "description": "ข้อมูลส่วนตัวและแคลอรี่ที่ควรได้รับต่อวัน"},
+    {"name": "อาหาร", "description": "รายการอาหาร วิเคราะห์ภาพ และบันทึกการกิน"},
+    {"name": "แอดมิน", "description": "จัดการบัญชีผู้ใช้และข้อมูลอาหาร (เฉพาะแอดมิน)"},
+]
+
+app = FastAPI(title="My Nutrition Secretary API", openapi_tags=OPENAPI_TAGS)
 
 app.add_middleware(
     CORSMiddleware,
@@ -161,7 +170,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
 
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    if current_user["role_id"] != 1:
+    if current_user["role_id"] != ADMIN_ROLE_ID:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="ปฏิเสธการเข้าถึง: เฉพาะผู้ดูแลระบบ (Admin) เท่านั้น",
@@ -202,147 +211,235 @@ def today_local() -> date:
     return datetime.now(LOCAL_TZ).date()
 
 
-class UserRegister(BaseModel):
-    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.]+$")
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=72)
+def _check_birth_date(value: date) -> date:
+    return check_birth_date(value, today_local())
 
-    _email_length = field_validator("email")(check_email_length)
-    _password_bytes = field_validator("password")(check_password_bytes)
+
+# ชนิดข้อมูลที่ใช้ซ้ำหลายที่ กฎของแต่ละช่องอยู่ที่นี่ที่เดียว
+Username = Annotated[str, Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.]+$")]
+Email = Annotated[EmailStr, AfterValidator(check_email_length)]
+NewPassword = Annotated[str, Field(min_length=8, max_length=72), AfterValidator(check_password_bytes)]
+LoginPassword = Annotated[str, Field(max_length=128)]
+RoleId = Literal[1, 2]  # 1 = แอดมิน, 2 = ผู้ใช้ทั่วไป
+Gender = Literal["male", "female"]
+Goal = Literal["lose", "maintain", "gain"]
+BirthDate = Annotated[date, AfterValidator(_check_birth_date)]  # อายุ 13-100 ปี
+# ปัดทศนิยม 2 ตำแหน่งก่อนตรวจช่วง ให้ตรงกับคอลัมน์ numeric(x, 2)
+Weight = Annotated[float, BeforeValidator(round_2), Field(ge=20, le=300)]    # kg
+Height = Annotated[float, BeforeValidator(round_2), Field(ge=100, le=250)]   # cm
+ActivityLevel = Annotated[int, Field(ge=1, le=5)]
+FoodName = Annotated[str, Field(min_length=1, max_length=100)]
+Calories = Annotated[float, BeforeValidator(round_2), Field(ge=0, le=900)]  # kcal ต่อ 100 กรัม (ไขมันล้วน = 900)
+DbId = Annotated[int, Field(gt=0, le=INT4_MAX)]
+
+
+class UserRegister(BaseModel):
+    username: Username
+    email: Email
+    password: NewPassword
 
 
 class UserLogin(BaseModel):
     email: EmailStr
-    password: str = Field(max_length=128)
-
-
-def _check_birth_date(value: date | None) -> date | None:
-    return None if value is None else check_birth_date(value, today_local())
+    password: LoginPassword
 
 
 class ProfileUpdate(BaseModel):
     """ส่งเฉพาะฟิลด์ที่ต้องการแก้ (แต่ละหน้าจอ onboarding ส่งเฉพาะของหน้านั้นได้)"""
-    gender: Literal["male", "female"] | None = None
-    birth_date: date | None = None
-    weight: float | None = Field(default=None, ge=20, le=300)       # kg
-    height: float | None = Field(default=None, ge=100, le=250)      # cm
-    activity_level: int | None = Field(default=None, ge=1, le=5)
-    goal: Literal["lose", "maintain", "gain"] | None = None
-
-    _birth_date = field_validator("birth_date")(_check_birth_date)
-    # ปัดทศนิยม 2 ตำแหน่งก่อนตรวจช่วง ให้ตรงกับคอลัมน์ numeric(5, 2)
-    _round = field_validator("weight", "height", mode="before")(round_2)
+    gender: Gender | None = None
+    birth_date: BirthDate | None = None
+    weight: Weight | None = None
+    height: Height | None = None
+    activity_level: ActivityLevel | None = None
+    goal: Goal | None = None
 
 
 class RequirementPreview(BaseModel):
-    gender: Literal["male", "female"]
-    birth_date: date
-    weight: float = Field(ge=20, le=300)
-    height: float = Field(ge=100, le=250)
-    activity_level: int = Field(ge=1, le=5)
-    goal: Literal["lose", "maintain", "gain"]
-
-    _birth_date = field_validator("birth_date")(_check_birth_date)
-    _round = field_validator("weight", "height", mode="before")(round_2)
+    gender: Gender
+    birth_date: BirthDate
+    weight: Weight
+    height: Height
+    activity_level: ActivityLevel
+    goal: Goal
 
 
 class AccountUpdate(BaseModel):
-    username: str | None = Field(default=None, min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.]+$")
-    current_password: str | None = Field(default=None, max_length=128)
-    new_password: str | None = Field(default=None, min_length=8, max_length=72)
-
-    @field_validator("new_password")
-    @classmethod
-    def _password_bytes(cls, value: str | None) -> str | None:
-        return None if value is None else check_password_bytes(value)
+    username: Username | None = None
+    current_password: LoginPassword | None = None
+    new_password: NewPassword | None = None
 
 
 class FoodLogRequest(BaseModel):
-    food_id: int = Field(gt=0, le=INT4_MAX)
+    food_id: DbId
     meal_type: Literal["breakfast", "lunch", "dinner", "snack"]
 
 
 class FoodRequest(BaseModel):
-    food_name: str = Field(min_length=1, max_length=100)
-    # พลังงานต่อ 100 กรัม ไม่เกิน 900 kcal (ไขมันล้วน)
-    calories_per_100g: float = Field(ge=0, le=900)
+    food_name: FoodName
+    calories_per_100g: Calories
 
-    _round = field_validator("calories_per_100g", mode="before")(round_2)
+
+class FoodUpdate(BaseModel):
+    """แก้ไขเมนู: ส่งเฉพาะฟิลด์ที่ต้องการแก้"""
+    food_name: FoodName | None = None
+    calories_per_100g: Calories | None = None
+
+
+class AdminUserCreate(UserRegister):
+    role_id: RoleId = USER_ROLE_ID
+
+
+class AdminUserUpdate(BaseModel):
+    """แอดมินแก้ไขบัญชี: ส่งเฉพาะฟิลด์ที่ต้องการแก้"""
+    username: Username | None = None
+    email: Email | None = None
+    role_id: RoleId | None = None
+    new_password: NewPassword | None = None
+
+
+# ค่าค้นหาในรายการ: อนุญาตเฉพาะตัวอักษร ตัวเลข _ @ . - (กันอักขระพิเศษของตัวกรอง PostgREST)
+SearchQuery = Query(default=None, max_length=100, pattern=r"^[\w@.\-]+$")
+LimitQuery = Query(default=20, ge=1, le=100)
+OffsetQuery = Query(default=0, ge=0, le=1_000_000)
+
+
+# ==========================================
+# รูปแบบผลลัพธ์: ทุก API ตอบ {success, message, data} เหมือนกัน
+# (error ตอบ {detail} ตามมาตรฐาน FastAPI)
+# ==========================================
+def ok(message: str, data=None, **extra) -> dict:
+    return {"success": True, "message": message, "data": data, **extra}
+
+
+def fetch_page(query, limit: int, offset: int) -> dict:
+    """ดึงข้อมูลทีละหน้า ถ้าขอหน้าที่เกินจำนวนข้อมูล ให้ได้รายการว่างแทน error"""
+    try:
+        result = query.range(offset, offset + limit - 1).execute()
+    except APIError as e:
+        if getattr(e, "code", None) != "PGRST103":  # Requested range not satisfiable
+            raise
+        return {"data": [], "total": None, "limit": limit, "offset": offset}
+    return {"data": result.data, "total": result.count or 0, "limit": limit, "offset": offset}
 
 
 # ==========================================
 # API 1: สมัครสมาชิก (Register)
 # ==========================================
-@app.post("/api/register", status_code=status.HTTP_201_CREATED)
-def register(user: UserRegister):
-    email = user.email.lower()
+def ensure_email_and_username_free(email: str | None, username: str | None, exclude_user_id: int | None = None):
+    """เช็กว่าอีเมล/ชื่อผู้ใช้ยังไม่มีคนอื่นใช้ (exclude_user_id = ตัวเอง ตอนแก้ไขบัญชี)"""
+    for column, value, message in (
+        ("email", email, "อีเมลนี้ถูกใช้งานแล้ว"),
+        ("username", username, "ชื่อผู้ใช้นี้ถูกใช้งานแล้ว"),
+    ):
+        if value is None:
+            continue
+        rows = supabase.table("users").select("user_id").eq(column, value).execute().data
+        if any(row["user_id"] != exclude_user_id for row in rows):
+            raise HTTPException(status_code=409, detail=message)
 
-    if supabase.table("users").select("user_id").eq("email", email).execute().data:
-        raise HTTPException(status_code=400, detail="อีเมลนี้ถูกใช้งานแล้ว")
-    if supabase.table("users").select("user_id").eq("username", user.username).execute().data:
-        raise HTTPException(status_code=400, detail="ชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
+
+def create_user(username: str, email: str, password: str, role_id: int = USER_ROLE_ID) -> dict:
+    """สร้างบัญชี + โปรไฟล์ว่าง ใช้ร่วมกันระหว่างสมัครสมาชิกและแอดมินเพิ่มบัญชี"""
+    email = email.lower()
+    ensure_email_and_username_free(email, username)
 
     new_user = {
-        "username": user.username,
+        "username": username,
         "email": email,
-        "password_hash": hash_password(user.password),
-        "role_id": 2,  # 2 = ผู้ใช้ทั่วไป
+        "password_hash": hash_password(password),
+        "role_id": role_id,
     }
     try:
         response = supabase.table("users").insert(new_user).execute()
     except APIError as e:
         # กันกรณีสมัครพร้อมกันสองเครื่องด้วยอีเมล/ชื่อเดียวกัน
         if is_unique_violation(e):
-            raise HTTPException(status_code=400, detail="อีเมลหรือชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
+            raise HTTPException(status_code=409, detail="อีเมลหรือชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
         raise
 
-    user_id = response.data[0]["user_id"]
-    supabase.table("user_profiles").insert({"user_id": user_id}).execute()
+    created = response.data[0]
+    supabase.table("user_profiles").insert({"user_id": created["user_id"]}).execute()
+    return created
 
-    return {"success": True, "message": "สมัครสมาชิกสำเร็จ", "user_id": user_id}
+
+@app.post("/api/register", tags=["บัญชีผู้ใช้"], status_code=status.HTTP_201_CREATED)
+def register(user: UserRegister):
+    created = create_user(user.username, user.email, user.password)
+    return ok("สมัครสมาชิกสำเร็จ", {"user_id": created["user_id"]})
 
 
 # ==========================================
 # API 2: เข้าสู่ระบบ (Login & ออก JWT Token)
 # ==========================================
-@app.post("/api/login")
-def login(user: UserLogin):
-    response = supabase.table("users").select("*").eq("email", user.email.lower()).execute()
-    if not response.data or not verify_password(user.password, response.data[0]["password_hash"]):
+def authenticate(email: str, password: str) -> dict:
+    response = supabase.table("users").select("*").eq("email", email.lower()).execute()
+    if not response.data or not verify_password(password, response.data[0]["password_hash"]):
         raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
+    return response.data[0]
 
-    db_user = response.data[0]
-    access_token = create_access_token(db_user)
-    return {
-        "success": True,
-        "access_token": access_token,
+
+def login_response(db_user: dict) -> dict:
+    return ok("เข้าสู่ระบบสำเร็จ", {
+        "access_token": create_access_token(db_user),
         "token_type": "bearer",
         "role_id": db_user["role_id"],
         "username": db_user["username"],
-    }
+    })
+
+
+@app.post("/api/login", tags=["บัญชีผู้ใช้"])
+def login(user: UserLogin):
+    return login_response(authenticate(user.email, user.password))
+
+
+@app.post("/api/admin/login", tags=["แอดมิน"])
+def admin_login(user: UserLogin):
+    """เข้าสู่ระบบหน้าจัดการ: รับเฉพาะบัญชีแอดมิน"""
+    db_user = authenticate(user.email, user.password)
+    if db_user["role_id"] != ADMIN_ROLE_ID:
+        raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ผู้ดูแลระบบ")
+    return login_response(db_user)
 
 
 # ==========================================
 # API 3: ข้อมูลผู้ใช้ปัจจุบัน / Admin
 # ==========================================
-@app.get("/api/me")
+@app.get("/api/me", tags=["บัญชีผู้ใช้"])
 def read_users_me(current_user: dict = Depends(get_current_user)):
-    return {
-        "message": "ยืนยันตัวตนสำเร็จ",
-        "your_info": public_user(current_user),
-        "profile": get_or_create_profile(current_user["user_id"]),
-    }
+    return ok("ยืนยันตัวตนสำเร็จ", {
+        "user": public_user(current_user),
+        "profile": with_completeness(get_or_create_profile(current_user["user_id"])),
+    })
 
 
-@app.get("/api/admin/dashboard")
+def count_rows(table: str, column: str, **filters) -> int:
+    query = supabase.table(table).select(column, count="exact")
+    for key, value in filters.items():
+        query = query.eq(key, value)
+    return query.limit(1).execute().count or 0
+
+
+@app.get("/api/admin/dashboard", tags=["แอดมิน"])
 def admin_only_route(admin_user: dict = Depends(require_admin)):
-    return {"message": "ยินดีต้อนรับผู้ดูแลระบบ (Admin)", "admin_info": public_user(admin_user)}
+    return ok("ยินดีต้อนรับผู้ดูแลระบบ (Admin)", {
+        "admin": public_user(admin_user),
+        "stats": {
+            "total_users": count_rows("users", "user_id"),
+            "total_admins": count_rows("users", "user_id", role_id=ADMIN_ROLE_ID),
+            "total_foods": count_rows("foods", "food_id"),
+        },
+    })
 
 
 # ==========================================
 # API 4: ข้อมูลส่วนตัว & เป้าหมายโภชนาการ
 # ==========================================
 PROFILE_INPUT_FIELDS = ("gender", "birth_date", "weight", "height", "activity_level", "goal")
+
+
+def with_completeness(profile: dict) -> dict:
+    """เพิ่ม is_complete = กรอกข้อมูลส่วนตัวครบทั้ง 6 ช่องหรือยัง"""
+    return {**profile, "is_complete": all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS)}
 
 
 def get_or_create_profile(user_id: int) -> dict:
@@ -358,14 +455,12 @@ def get_or_create_profile(user_id: int) -> dict:
         return supabase.table("user_profiles").select("*").eq("user_id", user_id).execute().data[0]
 
 
-@app.get("/api/profile")
+@app.get("/api/profile", tags=["ข้อมูลส่วนตัว"])
 def get_profile(current_user: dict = Depends(get_current_user)):
-    profile = get_or_create_profile(current_user["user_id"])
-    profile["is_complete"] = all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS)
-    return profile
+    return ok("ดึงข้อมูลสำเร็จ", with_completeness(get_or_create_profile(current_user["user_id"])))
 
 
-@app.put("/api/profile")
+@app.put("/api/profile", tags=["ข้อมูลส่วนตัว"])
 def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_current_user)):
     user_id = current_user["user_id"]
     current = get_or_create_profile(user_id)
@@ -392,24 +487,22 @@ def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail="ไม่มีข้อมูลที่ต้องการแก้ไข")
 
     result = supabase.table("user_profiles").update(changes).eq("user_id", user_id).execute()
-    profile = result.data[0]
-    profile["is_complete"] = all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS)
-    return profile
+    return ok("บันทึกข้อมูลส่วนตัวสำเร็จ", with_completeness(result.data[0]))
 
 
-@app.post("/api/profile/preview")
+@app.post("/api/profile/preview", tags=["ข้อมูลส่วนตัว"])
 def preview_requirement(data: RequirementPreview, current_user: dict = Depends(get_current_user)):
     """คำนวณเป้าหมายให้ดูก่อน ยังไม่บันทึก"""
     requirement = calculate_daily_requirement(
         **data.model_dump(), today=today_local()
     )
-    return requirement.__dict__
+    return ok("คำนวณสำเร็จ", requirement.__dict__)
 
 
 # ==========================================
 # API 5: แก้ไขบัญชีผู้ใช้ (username / รหัสผ่าน)
 # ==========================================
-@app.put("/api/account")
+@app.put("/api/account", tags=["บัญชีผู้ใช้"])
 def update_account(update: AccountUpdate, current_user: dict = Depends(get_current_user)):
     changes = {}
 
@@ -437,36 +530,32 @@ def update_account(update: AccountUpdate, current_user: dict = Depends(get_curre
             updated_user = {**current_user, **changes}
     except APIError as e:
         if is_unique_violation(e):
-            raise HTTPException(status_code=400, detail="ชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
+            raise HTTPException(status_code=409, detail="ชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
         raise
 
-    response = {
-        "success": True,
-        "message": "แก้ไขบัญชีสำเร็จ",
-        "username": updated_user["username"],
-    }
+    data = {"username": updated_user["username"]}
     if "password_hash" in changes:
         # ส่ง token ใหม่กลับไป เครื่องที่กำลังใช้งานจะได้ไม่ต้องล็อกอินใหม่
-        response["access_token"] = create_access_token(updated_user)
-        response["token_type"] = "bearer"
-    return response
+        data["access_token"] = create_access_token(updated_user)
+        data["token_type"] = "bearer"
+    return ok("แก้ไขบัญชีสำเร็จ", data)
 
 
 # ==========================================
 # API 5.1: ออกจากระบบ (Logout)
 # ==========================================
-@app.post("/api/logout")
+@app.post("/api/logout", tags=["บัญชีผู้ใช้"])
 def logout(current_user: dict = Depends(get_current_user)):
     """ทำให้ token ทั้งหมดของผู้ใช้นี้ใช้ไม่ได้ (ออกจากระบบทุกเครื่อง)
     แอปต้องลบ token ที่เก็บไว้ในเครื่องด้วย"""
     bump_token_version(current_user)
-    return {"success": True, "message": "ออกจากระบบสำเร็จ"}
+    return ok("ออกจากระบบสำเร็จ")
 
 
 # ==========================================
 # API 6: วิเคราะห์ภาพอาหาร
 # ==========================================
-@app.post("/api/analyze")
+@app.post("/api/analyze", tags=["อาหาร"])
 def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์รูปภาพ")
@@ -493,21 +582,22 @@ def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_
     response = supabase.table("foods").select("*").eq("food_name", predicted_class_name).execute()
     food = response.data[0] if response.data else None
 
-    return {
-        "success": True,
-        "food_name": predicted_class_name,
-        "confidence": round(confidence_score, 4),
-        "food_id": food["food_id"] if food else None,
-        "calories_per_100g": food["calories_per_100g"] if food else None,
-        "message": None if food else "ไม่พบข้อมูลแคลอรี่ของเมนูนี้ในฐานข้อมูล",
-    }
+    return ok(
+        "วิเคราะห์สำเร็จ" if food else "วิเคราะห์สำเร็จ แต่ไม่พบข้อมูลแคลอรี่ของเมนูนี้ในฐานข้อมูล",
+        {
+            "food_name": predicted_class_name,
+            "confidence": round(confidence_score, 4),
+            "food_id": food["food_id"] if food else None,
+            "calories_per_100g": food["calories_per_100g"] if food else None,
+        },
+    )
 
 
 # ==========================================
 # API 7: บันทึกประวัติการกิน (Food Logs)
 # ชั่วคราว: จะเปลี่ยนไปใช้ตาราง saved_menu ตามรายงานในสัปดาห์ที่ 5
 # ==========================================
-@app.post("/api/logs", status_code=status.HTTP_201_CREATED)
+@app.post("/api/logs", tags=["อาหาร"], status_code=status.HTTP_201_CREATED)
 def create_food_log(log: FoodLogRequest, current_user: dict = Depends(get_current_user)):
     if not supabase.table("foods").select("food_id").eq("food_id", log.food_id).execute().data:
         raise HTTPException(status_code=404, detail="ไม่พบเมนูอาหารนี้")
@@ -518,10 +608,10 @@ def create_food_log(log: FoodLogRequest, current_user: dict = Depends(get_curren
         "meal_type": log.meal_type,
     }
     result = supabase.table("food_logs").insert(data).execute()
-    return {"message": "บันทึกมื้ออาหารสำเร็จ", "data": result.data}
+    return ok("บันทึกมื้ออาหารสำเร็จ", result.data[0])
 
 
-@app.get("/api/logs/today")
+@app.get("/api/logs/today", tags=["อาหาร"])
 def get_today_logs(current_user: dict = Depends(get_current_user)):
     # ช่วงเวลา 00:00 - 24:00 ของวันนี้ตามเวลาประเทศไทย ไม่ขึ้นกับ timezone ของเครื่องเซิร์ฟเวอร์
     start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -538,13 +628,13 @@ def get_today_logs(current_user: dict = Depends(get_current_user)):
         .order("logged_at") \
         .execute()
 
-    return {"message": "ดึงข้อมูลสำเร็จ", "data": result.data}
+    return ok("ดึงข้อมูลสำเร็จ", result.data)
 
 
 # ==========================================
 # API 8: จัดการฐานข้อมูลอาหาร (Admin เท่านั้น)
 # ==========================================
-@app.post("/api/admin/foods", status_code=status.HTTP_201_CREATED)
+@app.post("/api/admin/foods", tags=["แอดมิน"], status_code=status.HTTP_201_CREATED)
 def add_food(food: FoodRequest, admin_user: dict = Depends(require_admin)):
     try:
         result = supabase.table("foods").insert(food.model_dump()).execute()
@@ -552,10 +642,10 @@ def add_food(food: FoodRequest, admin_user: dict = Depends(require_admin)):
         if is_unique_violation(e):
             raise HTTPException(status_code=409, detail="มีเมนูชื่อนี้อยู่แล้ว")
         raise
-    return {"message": "เพิ่มเมนูอาหารสำเร็จ", "data": result.data}
+    return ok("เพิ่มเมนูอาหารสำเร็จ", result.data[0])
 
 
-@app.delete("/api/admin/foods/{target_food_id}")
+@app.delete("/api/admin/foods/{target_food_id}", tags=["แอดมิน"])
 def delete_food(target_food_id: int = PathParam(gt=0, le=INT4_MAX), admin_user: dict = Depends(require_admin)):
     try:
         result = supabase.table("foods").delete().eq("food_id", target_food_id).execute()
@@ -566,4 +656,149 @@ def delete_food(target_food_id: int = PathParam(gt=0, le=INT4_MAX), admin_user: 
 
     if not result.data:
         raise HTTPException(status_code=404, detail=f"ไม่พบเมนูอาหารรหัส {target_food_id}")
-    return {"message": f"ลบเมนูอาหารรหัส {target_food_id} สำเร็จเรียบร้อย"}
+    return ok(f"ลบเมนูอาหารรหัส {target_food_id} สำเร็จ")
+
+
+@app.put("/api/admin/foods/{target_food_id}", tags=["แอดมิน"])
+def update_food(
+    update: FoodUpdate,
+    target_food_id: int = PathParam(gt=0, le=INT4_MAX),
+    admin_user: dict = Depends(require_admin),
+):
+    changes = update.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="ไม่มีข้อมูลที่ต้องการแก้ไข")
+
+    try:
+        result = supabase.table("foods").update(changes).eq("food_id", target_food_id).execute()
+    except APIError as e:
+        if is_unique_violation(e):
+            raise HTTPException(status_code=409, detail="มีเมนูชื่อนี้อยู่แล้ว")
+        raise
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"ไม่พบเมนูอาหารรหัส {target_food_id}")
+    return ok("แก้ไขเมนูอาหารสำเร็จ", result.data[0])
+
+
+# ==========================================
+# API 9: ดูรายการอาหาร (ผู้ใช้ที่ล็อกอินแล้วทุกคน)
+# ==========================================
+@app.get("/api/foods", tags=["อาหาร"])
+def list_foods(
+    q: str | None = SearchQuery,
+    limit: int = LimitQuery,
+    offset: int = OffsetQuery,
+    current_user: dict = Depends(get_current_user),
+):
+    """ค้นหาจากชื่อเมนู (q) และแบ่งหน้าด้วย limit / offset"""
+    query = supabase.table("foods").select("*", count="exact")
+    if q:
+        query = query.ilike("food_name", f"%{q}%")
+    return ok("ดึงข้อมูลสำเร็จ", **fetch_page(query.order("food_name"), limit, offset))
+
+
+@app.get("/api/foods/{target_food_id}", tags=["อาหาร"])
+def get_food(target_food_id: int = PathParam(gt=0, le=INT4_MAX), current_user: dict = Depends(get_current_user)):
+    result = supabase.table("foods").select("*").eq("food_id", target_food_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"ไม่พบเมนูอาหารรหัส {target_food_id}")
+    return ok("ดึงข้อมูลสำเร็จ", result.data[0])
+
+
+# ==========================================
+# API 10: จัดการบัญชีผู้ใช้ (Admin เท่านั้น)
+# ==========================================
+USER_LIST_COLUMNS = "user_id, username, email, role_id, created_at, updated_at"
+
+
+def get_user_or_404(user_id: int) -> dict:
+    result = supabase.table("users").select(USER_LIST_COLUMNS + ", token_version") \
+        .eq("user_id", user_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"ไม่พบบัญชีผู้ใช้รหัส {user_id}")
+    return result.data[0]
+
+
+@app.get("/api/admin/users", tags=["แอดมิน"])
+def list_users(
+    q: str | None = SearchQuery,
+    role_id: int | None = Query(default=None, ge=1, le=2),  # ค่าจาก URL เป็นข้อความ จึงใช้ int แทน Literal
+    limit: int = LimitQuery,
+    offset: int = OffsetQuery,
+    admin_user: dict = Depends(require_admin),
+):
+    """ค้นหาจาก username หรืออีเมล (q), กรองตามสิทธิ์ (role_id) และแบ่งหน้าด้วย limit / offset"""
+    query = supabase.table("users").select(USER_LIST_COLUMNS, count="exact")
+    if q:
+        query = query.or_(f"username.ilike.%{q}%,email.ilike.%{q}%")
+    if role_id is not None:
+        query = query.eq("role_id", role_id)
+    return ok("ดึงข้อมูลสำเร็จ", **fetch_page(query.order("user_id"), limit, offset))
+
+
+@app.get("/api/admin/users/{target_user_id}", tags=["แอดมิน"])
+def get_user(target_user_id: int = PathParam(gt=0, le=INT4_MAX), admin_user: dict = Depends(require_admin)):
+    user = public_user(get_user_or_404(target_user_id))
+    user["profile"] = with_completeness(get_or_create_profile(target_user_id))
+    return ok("ดึงข้อมูลสำเร็จ", user)
+
+
+@app.post("/api/admin/users", tags=["แอดมิน"], status_code=status.HTTP_201_CREATED)
+def admin_create_user(new_user: AdminUserCreate, admin_user: dict = Depends(require_admin)):
+    created = create_user(new_user.username, new_user.email, new_user.password, role_id=new_user.role_id)
+    return ok("เพิ่มบัญชีผู้ใช้สำเร็จ", public_user(get_user_or_404(created["user_id"])))
+
+
+@app.put("/api/admin/users/{target_user_id}", tags=["แอดมิน"])
+def admin_update_user(
+    update: AdminUserUpdate,
+    target_user_id: int = PathParam(gt=0, le=INT4_MAX),
+    admin_user: dict = Depends(require_admin),
+):
+    target = get_user_or_404(target_user_id)
+
+    # กันแอดมินลดสิทธิ์ตัวเอง (ถ้าเป็นแอดมินคนเดียว จะไม่มีใครเข้าหน้าจัดการได้อีก)
+    if target_user_id == admin_user["user_id"] and update.role_id not in (None, ADMIN_ROLE_ID):
+        raise HTTPException(status_code=400, detail="ไม่สามารถลดสิทธิ์บัญชีของตัวเองได้")
+
+    changes = {}
+    if update.username is not None and update.username != target["username"]:
+        changes["username"] = update.username
+    if update.email is not None and update.email.lower() != target["email"]:
+        changes["email"] = update.email.lower()
+    if update.role_id is not None and update.role_id != target["role_id"]:
+        changes["role_id"] = update.role_id
+    if update.new_password is not None:
+        changes["password_hash"] = hash_password(update.new_password)
+
+    if not changes:
+        raise HTTPException(status_code=400, detail="ไม่มีข้อมูลที่ต้องการแก้ไข")
+
+    ensure_email_and_username_free(changes.get("email"), changes.get("username"), exclude_user_id=target_user_id)
+
+    try:
+        if "password_hash" in changes:
+            # รีเซ็ตรหัสผ่าน: บังคับให้ผู้ใช้คนนั้นออกจากระบบทุกเครื่อง
+            updated = bump_token_version(target, changes)
+        else:
+            updated = supabase.table("users").update(changes).eq("user_id", target_user_id).execute().data[0]
+    except APIError as e:
+        if is_unique_violation(e):
+            raise HTTPException(status_code=409, detail="อีเมลหรือชื่อผู้ใช้นี้ถูกใช้งานแล้ว")
+        raise
+
+    data = {k: updated[k] for k in ("user_id", "username", "email", "role_id", "created_at", "updated_at")}
+    return ok("แก้ไขบัญชีผู้ใช้สำเร็จ", data)
+
+
+@app.delete("/api/admin/users/{target_user_id}", tags=["แอดมิน"])
+def admin_delete_user(target_user_id: int = PathParam(gt=0, le=INT4_MAX), admin_user: dict = Depends(require_admin)):
+    if target_user_id == admin_user["user_id"]:
+        raise HTTPException(status_code=400, detail="ไม่สามารถลบบัญชีของตัวเองได้")
+
+    # โปรไฟล์และประวัติการกินของผู้ใช้จะถูกลบตามไปด้วย (on delete cascade)
+    result = supabase.table("users").delete().eq("user_id", target_user_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"ไม่พบบัญชีผู้ใช้รหัส {target_user_id}")
+    return ok(f"ลบบัญชีผู้ใช้รหัส {target_user_id} สำเร็จ")
