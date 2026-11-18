@@ -41,7 +41,7 @@ create table public.users (
 -- user_profiles (ตารางที่ 38) - one row per user
 -- activity_level: 1 = sedentary ... 5 = extra active
 -- goal: lose / maintain / gain
--- daily_* are calculated by the FastAPI server (nutrition.py)
+-- daily_calories is calculated by the FastAPI server (nutrition.py)
 -- ---------------------------------------------------------------------
 create table public.user_profiles (
   profile_id         integer generated always as identity primary key,
@@ -53,24 +53,18 @@ create table public.user_profiles (
   activity_level     smallint check (activity_level between 1 and 5),
   goal               varchar(50) check (goal in ('lose', 'maintain', 'gain')),
   daily_calories     numeric(7, 2),  -- kcal
-  daily_protein      numeric(7, 2),  -- g
-  daily_carbohydrate numeric(7, 2),  -- g
-  daily_fat          numeric(7, 2),  -- g
   calculated_at      timestamptz,
   updated_at         timestamptz not null default now()
 );
 
 -- ---------------------------------------------------------------------
--- foods (ตารางที่ 39) - nutrition values per 100 g
+-- foods (ตารางที่ 39) - calories per 100 g
 -- food_name must match the class name of the YOLO model exactly.
 -- ---------------------------------------------------------------------
 create table public.foods (
   food_id               integer generated always as identity primary key,
   food_name             varchar(100) not null unique,
   calories_per_100g     numeric(7, 2) not null check (calories_per_100g >= 0),
-  protein_per_100g      numeric(7, 2) not null default 0 check (protein_per_100g >= 0),
-  carbohydrate_per_100g numeric(7, 2) not null default 0 check (carbohydrate_per_100g >= 0),
-  fat_per_100g          numeric(7, 2) not null default 0 check (fat_per_100g >= 0),
   created_at            timestamptz not null default now(),
   updated_at            timestamptz not null default now()
 );
@@ -86,9 +80,6 @@ create table public.saved_menu (
   estimated_weight   numeric(7, 2) not null check (estimated_weight > 0),  -- g
   is_manual_weight   boolean not null default false,  -- true when user typed the weight
   total_calories     numeric(8, 2) not null,
-  total_protein      numeric(8, 2) not null,
-  total_carbohydrate numeric(8, 2) not null,
-  total_fat          numeric(8, 2) not null,
   saved_at           timestamptz not null default now()
 );
 

@@ -45,7 +45,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | POST | `/api/register` | - | สมัครสมาชิก `{username, email, password}` (รหัสผ่าน 8–72 ตัว, ภาษาไทยไม่เกิน 24 ตัว) |
 | POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `access_token` |
 | GET | `/api/me` | 🔒 | ข้อมูลบัญชี + โปรไฟล์ |
-| GET | `/api/profile` | 🔒 | ข้อมูลส่วนตัว + เป้าหมายโภชนาการ |
+| GET | `/api/profile` | 🔒 | ข้อมูลส่วนตัว + แคลอรี่ที่ควรได้รับต่อวัน |
 | PUT | `/api/profile` | 🔒 | แก้ข้อมูลส่วนตัว (ส่งเฉพาะฟิลด์ที่แก้) ระบบคำนวณเป้าหมายให้อัตโนมัติ |
 | POST | `/api/profile/preview` | 🔒 | คำนวณเป้าหมายให้ดูก่อน ยังไม่บันทึก |
 | PUT | `/api/account` | 🔒 | แก้ username / เปลี่ยนรหัสผ่าน |
@@ -54,7 +54,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | POST | `/api/logs` | 🔒 | บันทึกมื้ออาหาร `{food_id, meal_type}` |
 | GET | `/api/logs/today` | 🔒 | ประวัติการกินวันนี้ (เวลาไทย) |
 | GET | `/api/admin/dashboard` | 🔒 admin | ทดสอบสิทธิ์แอดมิน |
-| POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู (ค่าต่อ 100 กรัม: kcal 0–900, สารอาหาร 0–100 g) |
+| POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู `{food_name, calories_per_100g}` (0–900 kcal ต่อ 100 กรัม) |
 | DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู |
 
 ### ข้อมูลส่วนตัว (`PUT /api/profile`)
@@ -80,14 +80,13 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | `goal` | `lose`, `maintain`, `gain` |
 
 แต่ละหน้าจอ onboarding ส่งเฉพาะฟิลด์ของหน้านั้นได้
-เมื่อกรอกครบทั้ง 6 ฟิลด์ (`is_complete: true`) ระบบจะเติม `daily_calories`, `daily_protein`, `daily_carbohydrate`, `daily_fat` ให้
+เมื่อกรอกครบทั้ง 6 ฟิลด์ (`is_complete: true`) ระบบจะเติม `daily_calories` (kcal ต่อวัน) ให้
 
 ### การคำนวณเป้าหมาย (`nutrition.py`)
 
 - BMR (Mifflin-St Jeor): ชาย `10w + 6.25h − 5age + 5`, หญิง `10w + 6.25h − 5age − 161`
 - TDEE = BMR × ตัวคูณกิจกรรม (1.2 / 1.375 / 1.55 / 1.725 / 1.9)
 - เป้าหมาย: ลด −500 kcal, คงที่ 0, เพิ่ม +300 kcal (ขั้นต่ำ หญิง 1200 / ชาย 1500 kcal)
-- สารอาหาร: โปรตีน 20%, คาร์โบไฮเดรต 50%, ไขมัน 30% ของพลังงาน
 
 ### เปลี่ยนรหัสผ่าน (`PUT /api/account`)
 
@@ -105,7 +104,10 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## อัปเดตฐานข้อมูลที่สร้างไว้แล้ว
 
-ถ้าสร้างตารางด้วย `schema.sql` ก่อนวันที่ 19 พ.ย. ให้รัน `supabase/migrations/002_add_token_version.sql` ใน SQL Editor หนึ่งครั้ง
+ถ้าสร้างตารางด้วย `schema.sql` เวอร์ชันก่อนหน้า ให้รันไฟล์ใน `supabase/migrations/` ใน SQL Editor ตามลำดับ (รันซ้ำได้ ไม่เสียหาย)
+
+- `002_add_token_version.sql` เพิ่มระบบออกจากระบบ
+- `003_calories_only.sql` ตัดโปรตีน คาร์บ ไขมัน ออก เหลือแค่แคลอรี่
 
 ## ความปลอดภัย
 
