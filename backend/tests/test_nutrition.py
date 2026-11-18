@@ -19,9 +19,6 @@ def test_female_lose():
     assert r.bmr == 1345.25
     assert r.tdee == 1849.72
     assert r.daily_calories == 1349.72
-    assert r.daily_protein == 67.49
-    assert r.daily_carbohydrate == 168.71
-    assert r.daily_fat == 44.99
 
 
 def test_male_maintain():

@@ -1,13 +1,11 @@
 """
-ระบบคำนวณเป้าหมายโภชนาการต่อวัน (Daily Requirement)
+ระบบคำนวณแคลอรี่ที่ควรได้รับต่อวัน (Daily Requirement)
 
 1. BMR - Mifflin-St Jeor
      ชาย  = 10*น้ำหนัก(kg) + 6.25*ส่วนสูง(cm) - 5*อายุ + 5
      หญิง = 10*น้ำหนัก(kg) + 6.25*ส่วนสูง(cm) - 5*อายุ - 161
 2. TDEE = BMR * ตัวคูณระดับกิจกรรม (ACTIVITY_FACTORS)
 3. ปรับตามเป้าหมาย (GOAL_ADJUSTMENTS) และไม่ต่ำกว่าขั้นต่ำ (MIN_CALORIES)
-4. แบ่งสารอาหาร: โปรตีน 20%, คาร์โบไฮเดรต 50%, ไขมัน 30% ของพลังงาน
-     โปรตีน/คาร์โบไฮเดรต 4 kcal/g, ไขมัน 9 kcal/g
 """
 
 from dataclasses import dataclass
@@ -32,19 +30,11 @@ MIN_CALORIES = {
     "female": 1200,
 }
 
-PROTEIN_RATIO = 0.20
-CARBOHYDRATE_RATIO = 0.50
-FAT_RATIO = 0.30
-
-
 @dataclass
 class DailyRequirement:
     bmr: float
     tdee: float
     daily_calories: float
-    daily_protein: float
-    daily_carbohydrate: float
-    daily_fat: float
 
 
 def calculate_age(birth_date: date, today: date | None = None) -> int:
@@ -79,7 +69,4 @@ def calculate_daily_requirement(
         bmr=round(bmr, 2),
         tdee=round(tdee, 2),
         daily_calories=round(calories, 2),
-        daily_protein=round(calories * PROTEIN_RATIO / 4, 2),
-        daily_carbohydrate=round(calories * CARBOHYDRATE_RATIO / 4, 2),
-        daily_fat=round(calories * FAT_RATIO / 9, 2),
     )

@@ -264,16 +264,10 @@ class FoodLogRequest(BaseModel):
 
 class FoodRequest(BaseModel):
     food_name: str = Field(min_length=1, max_length=100)
-    # ค่าต่อ 100 กรัม: พลังงานไม่เกิน 900 kcal (ไขมันล้วน), สารอาหารแต่ละตัวไม่เกิน 100 กรัม
+    # พลังงานต่อ 100 กรัม ไม่เกิน 900 kcal (ไขมันล้วน)
     calories_per_100g: float = Field(ge=0, le=900)
-    protein_per_100g: float = Field(default=0, ge=0, le=100)
-    carbohydrate_per_100g: float = Field(default=0, ge=0, le=100)
-    fat_per_100g: float = Field(default=0, ge=0, le=100)
 
-    _round = field_validator(
-        "calories_per_100g", "protein_per_100g", "carbohydrate_per_100g", "fat_per_100g",
-        mode="before",
-    )(round_2)
+    _round = field_validator("calories_per_100g", mode="before")(round_2)
 
 
 # ==========================================
@@ -391,9 +385,6 @@ def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_curre
         )
         changes.update({
             "daily_calories": requirement.daily_calories,
-            "daily_protein": requirement.daily_protein,
-            "daily_carbohydrate": requirement.daily_carbohydrate,
-            "daily_fat": requirement.daily_fat,
             "calculated_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -507,8 +498,8 @@ def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_
         "food_name": predicted_class_name,
         "confidence": round(confidence_score, 4),
         "food_id": food["food_id"] if food else None,
-        "nutrition": food,  # ค่าต่อ 100 กรัม หรือ null ถ้ายังไม่มีเมนูนี้ในฐานข้อมูล
-        "message": None if food else "ไม่พบข้อมูลโภชนาการเมนูนี้ในฐานข้อมูล",
+        "calories_per_100g": food["calories_per_100g"] if food else None,
+        "message": None if food else "ไม่พบข้อมูลแคลอรี่ของเมนูนี้ในฐานข้อมูล",
     }
 
 
