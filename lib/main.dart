@@ -1,12 +1,14 @@
 import 'dart:convert';
-import 'dart:math';
 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:camera/camera.dart';
-import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'auth_service.dart';
 
 // ───────────────────────── Type Definitions ─────────────────────────
 typedef StringMap = Map<String, String>;
@@ -29,12 +31,22 @@ List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: '.env');
+  final supabaseUrl = dotenv.env['SUPABASE_URL']?.trim() ?? '';
+  final publishableKey = dotenv.env['SUPABASE_PUBLISHABLE_KEY']?.trim() ?? '';
+  if (supabaseUrl.isEmpty || publishableKey.isEmpty) {
+    runApp(const SupabaseSetupRequiredApp());
+    return;
+  }
+  await Supabase.initialize(url: supabaseUrl, publishableKey: publishableKey);
   try {
     cameras = await availableCameras();
-  } catch (_) {
+  } on CameraException {
     cameras = [];
   }
-  runApp(const NutritionApp());
+  runApp(
+    NutritionApp(authService: SupabaseAuthService(Supabase.instance.client)),
+  );
 }
 
 // ───────────────────────── Admin Auth State ─────────────────────────
@@ -59,6 +71,8 @@ class AdminAuth extends ChangeNotifier {
 
 // ───────────────────────── App Data State ─────────────────────────
 class AppContent extends ChangeNotifier {
+  final AuthService authService;
+
   final Map<String, StringMap> users = {
     '6701': {
       'name': 'แคทเธอรีน ภูชาง',
@@ -177,11 +191,11 @@ class AppContent extends ChangeNotifier {
   bool get isLoggedIn => _currentAccountEmail != null;
 
   static const _accountsKey = 'nutrition_accounts_v1';
-  static const _sessionKey = 'nutrition_current_account';
 
   Future<void> initialize() async {
     _preferences = await SharedPreferences.getInstance();
     final storedAccounts = _preferences!.getString(_accountsKey);
+    var removedLocalCredentials = false;
     if (storedAccounts != null) {
       final decoded = jsonDecode(storedAccounts);
       if (decoded is! List) {
@@ -190,14 +204,25 @@ class AppContent extends ChangeNotifier {
       _accounts
         ..clear()
         ..addAll(decoded.map((item) => Map<String, dynamic>.from(item as Map)));
+      for (final account in _accounts) {
+        removedLocalCredentials =
+            account.remove('passwordHash') != null || removedLocalCredentials;
+        removedLocalCredentials =
+            account.remove('passwordSalt') != null || removedLocalCredentials;
+      }
     }
+    await _preferences!.remove('nutrition_current_account');
 
-    final savedEmail = _preferences!.getString(_sessionKey);
-    final account = _findAccount(savedEmail);
-    if (account != null) {
+    final currentEmail = authService.currentEmail;
+    if (currentEmail != null) {
+      final account =
+          _findAccount(currentEmail) ??
+          _newLocalProfile(currentEmail, authService.currentName);
+      if (!_accounts.contains(account)) _accounts.add(account);
       _loadAccount(account);
-    } else if (savedEmail != null) {
-      await _preferences!.remove(_sessionKey);
+      await _saveAccounts();
+    } else if (removedLocalCredentials) {
+      await _saveAccounts();
     }
   }
 
@@ -212,13 +237,19 @@ class AppContent extends ChangeNotifier {
     return null;
   }
 
+  DynamicMap _newLocalProfile(String accountEmail, String? accountName) => {
+    'name': accountName?.trim().isNotEmpty == true
+        ? accountName!.trim()
+        : accountEmail.split('@').first,
+    'email': accountEmail,
+  };
+
   bool startNewAccount({
     required String name,
     required String newEmail,
     required String password,
   }) {
     final normalizedEmail = newEmail.trim().toLowerCase();
-    if (_findAccount(normalizedEmail) != null) return false;
 
     _pendingName = name.trim();
     _pendingEmail = normalizedEmail;
@@ -237,62 +268,56 @@ class AppContent extends ChangeNotifier {
     return true;
   }
 
-  Future<void> completeRegistration() async {
+  Future<bool> completeRegistration() async {
     final name = _pendingName;
     final pendingEmail = _pendingEmail;
     final password = _pendingPassword;
     if (name == null || pendingEmail == null || password == null) {
       throw StateError('ไม่พบข้อมูลสมัครสมาชิก กรุณาเริ่มสมัครใหม่');
     }
-    if (_findAccount(pendingEmail) != null) {
-      throw StateError('อีเมลนี้มีบัญชีอยู่แล้ว');
-    }
-
-    final salt = _newSalt();
-    final account = <String, dynamic>{
-      'name': name,
-      'email': pendingEmail,
-      'passwordSalt': salt,
-      'passwordHash': _hashPassword(password, salt),
-    };
+    final hasSession = await authService.signUp(
+      name: name,
+      email: pendingEmail,
+      password: password,
+    );
+    final account =
+        _findAccount(pendingEmail) ?? _newLocalProfile(pendingEmail, name);
     _writeAccountData(account);
-    _accounts.add(account);
-    try {
-      await _saveAccounts();
-      await _saveSession(pendingEmail);
-    } catch (_) {
-      _accounts.remove(account);
-      await _saveAccounts();
-      rethrow;
-    }
-    _currentAccountEmail = pendingEmail;
+    if (!_accounts.contains(account)) _accounts.add(account);
+    await _saveAccounts();
     _pendingName = null;
     _pendingEmail = null;
     _pendingPassword = null;
+    if (hasSession) {
+      _loadAccount(account);
+    } else {
+      _currentAccountEmail = null;
+    }
     notifyListeners();
+    return hasSession;
   }
 
   Future<bool> login(String accountEmail, String password) async {
-    final account = _findAccount(accountEmail);
-    if (account == null) return false;
-    final salt = account['passwordSalt'];
-    final savedHash = account['passwordHash'];
-    if (salt is! String ||
-        savedHash is! String ||
-        !_passwordsMatch(_hashPassword(password, salt), savedHash)) {
-      return false;
-    }
-
-    final normalizedEmail = account['email'] as String;
-    await _saveSession(normalizedEmail);
+    final success = await authService.signIn(
+      email: accountEmail.trim(),
+      password: password,
+    );
+    if (!success) return false;
+    final normalizedEmail = (authService.currentEmail ?? accountEmail)
+        .trim()
+        .toLowerCase();
+    final account =
+        _findAccount(normalizedEmail) ??
+        _newLocalProfile(normalizedEmail, authService.currentName);
+    if (!_accounts.contains(account)) _accounts.add(account);
     _loadAccount(account);
+    await _saveAccounts();
     notifyListeners();
     return true;
   }
 
   Future<void> logout() async {
-    final removed = await _preferences!.remove(_sessionKey);
-    if (!removed) throw StateError('ลบสถานะการเข้าสู่ระบบไม่สำเร็จ');
+    await authService.signOut();
     _currentAccountEmail = null;
     notifyListeners();
   }
@@ -309,11 +334,19 @@ class AppContent extends ChangeNotifier {
       return false;
     }
     final currentAccount = _findAccount(_currentAccountEmail);
-    if (name != null && name.isNotEmpty) fullName = name;
+    if (name != null && name.isNotEmpty) {
+      await authService.updateName(name);
+      fullName = name;
+    }
     if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
+      final updatedEmail = await authService.updateEmail(normalizedEmail);
+      if (updatedEmail == null ||
+          updatedEmail.trim().toLowerCase() != normalizedEmail) {
+        return false;
+      }
       if (currentAccount != null) currentAccount['email'] = normalizedEmail;
       email = normalizedEmail;
-      if (currentAccount != null) _currentAccountEmail = normalizedEmail;
+      _currentAccountEmail = normalizedEmail;
     }
     if (newBirthDate != null) birthDate = newBirthDate;
     await _persistCurrentAccount();
@@ -341,56 +374,11 @@ class AppContent extends ChangeNotifier {
     required String oldPassword,
     required String newPassword,
   }) async {
-    final account = _findAccount(_currentAccountEmail);
-    if (account == null) return false;
-    final salt = account['passwordSalt'] as String;
-    if (!_passwordsMatch(
-      _hashPassword(oldPassword, salt),
-      account['passwordHash'] as String,
-    )) {
-      return false;
-    }
-    final newSalt = _newSalt();
-    account['passwordSalt'] = newSalt;
-    account['passwordHash'] = _hashPassword(newPassword, newSalt);
-    await _saveAccounts();
-    return true;
-  }
-
-  String _newSalt() {
-    final random = Random.secure();
-    return List<int>.generate(
-      16,
-      (_) => random.nextInt(256),
-    ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-  String _hashPassword(String password, String salt) {
-    final hmac = Hmac(sha256, utf8.encode(password));
-    final saltBytes = List<int>.generate(
-      salt.length ~/ 2,
-      (index) => int.parse(salt.substring(index * 2, index * 2 + 2), radix: 16),
+    if (_currentAccountEmail == null) return false;
+    return authService.changePassword(
+      oldPassword: oldPassword,
+      newPassword: newPassword,
     );
-    var block = hmac.convert([...saltBytes, 0, 0, 0, 1]).bytes;
-    final derivedKey = List<int>.from(block);
-    for (var iteration = 1; iteration < 50000; iteration++) {
-      block = hmac.convert(block).bytes;
-      for (var index = 0; index < derivedKey.length; index++) {
-        derivedKey[index] ^= block[index];
-      }
-    }
-    return derivedKey
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join();
-  }
-
-  bool _passwordsMatch(String actual, String expected) {
-    if (actual.length != expected.length) return false;
-    var difference = 0;
-    for (var index = 0; index < actual.length; index++) {
-      difference |= actual.codeUnitAt(index) ^ expected.codeUnitAt(index);
-    }
-    return difference == 0;
   }
 
   void _loadAccount(DynamicMap account) {
@@ -440,12 +428,6 @@ class AppContent extends ChangeNotifier {
     if (account == null) return;
     _writeAccountData(account);
     await _saveAccounts();
-    await _saveSession(_currentAccountEmail!);
-  }
-
-  Future<void> _saveSession(String accountEmail) async {
-    final saved = await _preferences!.setString(_sessionKey, accountEmail);
-    if (!saved) throw StateError('บันทึกสถานะการเข้าสู่ระบบไม่สำเร็จ');
   }
 
   Future<void> _saveAccounts() async {
@@ -472,7 +454,7 @@ class AppContent extends ChangeNotifier {
         : (10 * weight) + (6.25 * height) - (5 * age) - 161;
   }
 
-  AppContent() {
+  AppContent({required this.authService}) {
     final now = DateTime.now();
     final todayKey = dateKey(now);
     final yesterdayKey = dateKey(now.subtract(const Duration(days: 1)));
@@ -982,20 +964,44 @@ class AppContent extends ChangeNotifier {
 }
 
 // ───────────────────────── Root App ─────────────────────────
+class SupabaseSetupRequiredApp extends StatelessWidget {
+  const SupabaseSetupRequiredApp({super.key});
+
+  @override
+  Widget build(BuildContext context) => const MaterialApp(
+    home: Scaffold(
+      body: Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'ยังไม่ได้ตั้งค่า Supabase กรุณาใส่ Project URL และ '
+            'Publishable key ในไฟล์ .env แล้วเปิดแอปใหม่',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 class NutritionApp extends StatefulWidget {
-  const NutritionApp({super.key});
+  const NutritionApp({super.key, required this.authService});
+
+  final AuthService authService;
+
   @override
   State<NutritionApp> createState() => _NutritionAppState();
 }
 
 class _NutritionAppState extends State<NutritionApp> {
   final _auth = AdminAuth();
-  final _content = AppContent();
+  late final AppContent _content;
   late final Future<void> _initialization;
 
   @override
   void initState() {
     super.initState();
+    _content = AppContent(authService: widget.authService);
     _initialization = _content.initialize();
   }
 
@@ -3017,13 +3023,36 @@ class _GoalScreenState extends State<GoalScreen> {
                   targetType: _selectedTarget,
                   activity: _selectedActivity,
                 );
-                await content.completeRegistration();
-                if (context.mounted) {
+                final hasSession = await content.completeRegistration();
+                if (context.mounted && hasSession) {
                   Navigator.pushNamedAndRemoveUntil(
                     context,
                     '/home',
                     (_) => false,
                   );
+                } else if (context.mounted) {
+                  await showDialog<void>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('สมัครสมาชิกสำเร็จ'),
+                      content: const Text(
+                        'กรุณายืนยันอีเมลจากกล่องข้อความก่อนเข้าสู่ระบบ',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('ตกลง'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (context.mounted) {
+                    Navigator.pushNamedAndRemoveUntil(
+                      context,
+                      '/',
+                      (_) => false,
+                    );
+                  }
                 }
               } catch (error) {
                 if (context.mounted) {
