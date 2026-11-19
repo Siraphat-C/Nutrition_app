@@ -20,13 +20,19 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field
 from supabase import Client, create_client
 from ultralytics import YOLO
 
+from dashboard import Meal, build_alerts, month_summary
 from nutrition import calculate_daily_requirement
 from validation import (
     INT4_MAX,
     MAX_IMAGE_PIXELS,
+    SEARCH_PATTERN,
+    USERNAME_MAX_LENGTH,
+    USERNAME_MIN_LENGTH,
+    USERNAME_PATTERN,
     check_birth_date,
     check_email_length,
     check_password_bytes,
+    clean_username,
     round_2,
 )
 
@@ -216,7 +222,11 @@ def _check_birth_date(value: date) -> date:
 
 
 # ชนิดข้อมูลที่ใช้ซ้ำหลายที่ กฎของแต่ละช่องอยู่ที่นี่ที่เดียว
-Username = Annotated[str, Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.]+$")]
+Username = Annotated[
+    str,
+    BeforeValidator(clean_username),
+    Field(min_length=USERNAME_MIN_LENGTH, max_length=USERNAME_MAX_LENGTH, pattern=USERNAME_PATTERN),
+]
 Email = Annotated[EmailStr, AfterValidator(check_email_length)]
 NewPassword = Annotated[str, Field(min_length=8, max_length=72), AfterValidator(check_password_bytes)]
 LoginPassword = Annotated[str, Field(max_length=128)]
@@ -231,6 +241,8 @@ ActivityLevel = Annotated[int, Field(ge=1, le=5)]
 FoodName = Annotated[str, Field(min_length=1, max_length=100)]
 Calories = Annotated[float, BeforeValidator(round_2), Field(ge=0, le=900)]  # kcal ต่อ 100 กรัม (ไขมันล้วน = 900)
 DbId = Annotated[int, Field(gt=0, le=INT4_MAX)]
+FoodWeight = Annotated[float, BeforeValidator(round_2), Field(gt=0, le=2000)]  # กรัม ต่อ 1 มื้อ
+MealType = Literal["breakfast", "lunch", "dinner", "snack"]
 
 
 class UserRegister(BaseModel):
@@ -271,7 +283,13 @@ class AccountUpdate(BaseModel):
 
 class FoodLogRequest(BaseModel):
     food_id: DbId
-    meal_type: Literal["breakfast", "lunch", "dinner", "snack"]
+    meal_type: MealType
+    weight: FoodWeight = 300                      # กรัม
+    is_manual_weight: bool = False                # true = ผู้ใช้แก้น้ำหนักเอง
+
+
+class WeightLogRequest(BaseModel):
+    weight: Weight
 
 
 class FoodRequest(BaseModel):
@@ -297,8 +315,8 @@ class AdminUserUpdate(BaseModel):
     new_password: NewPassword | None = None
 
 
-# ค่าค้นหาในรายการ: อนุญาตเฉพาะตัวอักษร ตัวเลข _ @ . - (กันอักขระพิเศษของตัวกรอง PostgREST)
-SearchQuery = Query(default=None, max_length=100, pattern=r"^[\w@.\-]+$")
+# ค่าค้นหาในรายการ: ตัวอักษร (รวมภาษาไทย) ตัวเลข _ @ . - ไม่มีเว้นวรรค (กันอักขระพิเศษของตัวกรอง PostgREST)
+SearchQuery = Query(default=None, max_length=100, pattern=SEARCH_PATTERN)
 LimitQuery = Query(default=20, ge=1, le=100)
 OffsetQuery = Query(default=0, ge=0, le=1_000_000)
 
@@ -487,7 +505,13 @@ def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail="ไม่มีข้อมูลที่ต้องการแก้ไข")
 
     result = supabase.table("user_profiles").update(changes).eq("user_id", user_id).execute()
+    if "weight" in changes and _as_float(changes["weight"]) != _as_float(current.get("weight")):
+        supabase.table("weight_logs").insert({"user_id": user_id, "weight": changes["weight"]}).execute()
     return ok("บันทึกข้อมูลส่วนตัวสำเร็จ", with_completeness(result.data[0]))
+
+
+def _as_float(value) -> float | None:
+    return None if value is None else round(float(value), 2)
 
 
 @app.post("/api/profile/preview", tags=["ข้อมูลส่วนตัว"])
@@ -594,41 +618,175 @@ def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_
 
 
 # ==========================================
-# API 7: บันทึกประวัติการกิน (Food Logs)
-# ชั่วคราว: จะเปลี่ยนไปใช้ตาราง saved_menu ตามรายงานในสัปดาห์ที่ 5
+# API 7: บันทึกมื้ออาหาร (ตาราง saved_menu ตามรายงาน ตารางที่ 40)
 # ==========================================
+MEAL_SELECT = (
+    "log_id:saved_menu_id, meal_type, logged_at:saved_at, estimated_weight, is_manual_weight, "
+    "total_calories, food_id, foods(food_name, calories_per_100g)"
+)
+MAX_LOG_RANGE_DAYS = 92
+
+
+def utc_bounds(first_day: date, last_day: date) -> tuple[str, str]:
+    """00:00 ของวันแรก ถึง 24:00 ของวันสุดท้าย ตามเวลาไทย แปลงเป็น UTC (ลงท้าย Z เลี่ยงปัญหา + ใน URL)"""
+    start = datetime.combine(first_day, datetime.min.time(), LOCAL_TZ)
+    end = datetime.combine(last_day + timedelta(days=1), datetime.min.time(), LOCAL_TZ)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return start.astimezone(timezone.utc).strftime(fmt), end.astimezone(timezone.utc).strftime(fmt)
+
+
+def fetch_meals(user_id: int, first_day: date, last_day: date) -> list[dict]:
+    start, end = utc_bounds(first_day, last_day)
+    return supabase.table("saved_menu").select(MEAL_SELECT) \
+        .eq("user_id", user_id) \
+        .gte("saved_at", start) \
+        .lt("saved_at", end) \
+        .order("saved_at") \
+        .execute().data
+
+
+def to_meals(rows: list[dict]) -> list[Meal]:
+    return [
+        Meal(
+            eaten_at=datetime.fromisoformat(str(r["logged_at"]).replace("Z", "+00:00")),
+            meal_type=r["meal_type"],
+            food_name=(r.get("foods") or {}).get("food_name") or "unknown",
+            calories=float(r["total_calories"] or 0),
+        )
+        for r in rows
+    ]
+
+
 @app.post("/api/logs", tags=["อาหาร"], status_code=status.HTTP_201_CREATED)
 def create_food_log(log: FoodLogRequest, current_user: dict = Depends(get_current_user)):
-    if not supabase.table("foods").select("food_id").eq("food_id", log.food_id).execute().data:
+    rows = supabase.table("foods").select("food_id, calories_per_100g").eq("food_id", log.food_id).execute().data
+    if not rows:
         raise HTTPException(status_code=404, detail="ไม่พบเมนูอาหารนี้")
 
+    per_100g = float(rows[0]["calories_per_100g"] or 0)
     data = {
         "user_id": current_user["user_id"],
         "food_id": log.food_id,
         "meal_type": log.meal_type,
+        "estimated_weight": log.weight,
+        "is_manual_weight": log.is_manual_weight,
+        "total_calories": round(per_100g * log.weight / 100, 2),
     }
-    result = supabase.table("food_logs").insert(data).execute()
+    saved = supabase.table("saved_menu").insert(data).execute().data[0]
+    result = supabase.table("saved_menu").select(MEAL_SELECT).eq("saved_menu_id", saved["saved_menu_id"]).execute()
     return ok("บันทึกมื้ออาหารสำเร็จ", result.data[0])
 
 
 @app.get("/api/logs/today", tags=["อาหาร"])
 def get_today_logs(current_user: dict = Depends(get_current_user)):
-    # ช่วงเวลา 00:00 - 24:00 ของวันนี้ตามเวลาประเทศไทย ไม่ขึ้นกับ timezone ของเครื่องเซิร์ฟเวอร์
-    start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=1)
-    # ส่งเป็นเวลา UTC (ลงท้าย Z) เลี่ยงปัญหาเครื่องหมาย + ใน URL
-    start = start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = today_local()
+    return ok("ดึงข้อมูลสำเร็จ", fetch_meals(current_user["user_id"], today, today))
 
-    result = supabase.table("food_logs") \
-        .select("log_id, meal_type, logged_at, foods(food_name, calories_per_100g)") \
+
+@app.get("/api/logs", tags=["อาหาร"])
+def get_logs(
+    start: date = Query(..., description="วันแรก (YYYY-MM-DD) ตามเวลาไทย"),
+    end: date = Query(..., description="วันสุดท้าย (YYYY-MM-DD) ตามเวลาไทย"),
+    current_user: dict = Depends(get_current_user),
+):
+    if end < start:
+        raise HTTPException(status_code=422, detail="วันสุดท้ายต้องไม่อยู่ก่อนวันแรก")
+    if (end - start).days + 1 > MAX_LOG_RANGE_DAYS:
+        raise HTTPException(status_code=422, detail=f"ดึงได้ครั้งละไม่เกิน {MAX_LOG_RANGE_DAYS} วัน")
+    return ok("ดึงข้อมูลสำเร็จ", fetch_meals(current_user["user_id"], start, end))
+
+
+@app.delete("/api/logs/{log_id}", tags=["อาหาร"])
+def delete_log(log_id: int = PathParam(gt=0, le=INT4_MAX), current_user: dict = Depends(get_current_user)):
+    result = supabase.table("saved_menu").delete() \
+        .eq("saved_menu_id", log_id) \
         .eq("user_id", current_user["user_id"]) \
-        .gte("logged_at", start) \
-        .lt("logged_at", end) \
-        .order("logged_at") \
         .execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="ไม่พบมื้ออาหารนี้")
+    return ok("ลบมื้ออาหารสำเร็จ")
 
-    return ok("ดึงข้อมูลสำเร็จ", result.data)
+
+# ==========================================
+# API 7.1: Dashboard (สรุปรายเดือน, การแจ้งเตือน) และน้ำหนักย้อนหลัง
+# ==========================================
+def requirement_for(profile: dict):
+    if not all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS):
+        return None
+    return calculate_daily_requirement(
+        gender=profile["gender"],
+        birth_date=date.fromisoformat(str(profile["birth_date"])),
+        weight=float(profile["weight"]),
+        height=float(profile["height"]),
+        activity_level=int(profile["activity_level"]),
+        goal=profile["goal"],
+        today=today_local(),
+    )
+
+
+def fetch_weights(user_id: int, since: date) -> list[dict]:
+    start, _ = utc_bounds(since, since)
+    return supabase.table("weight_logs").select("weight_log_id, weight, logged_at") \
+        .eq("user_id", user_id) \
+        .gte("logged_at", start) \
+        .order("logged_at") \
+        .execute().data
+
+
+@app.get("/api/dashboard/summary", tags=["อาหาร"])
+def dashboard_summary(
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="เดือน YYYY-MM"),
+    current_user: dict = Depends(get_current_user),
+):
+    year, mon = int(month[:4]), int(month[5:])
+    first = date(year, mon, 1)
+    last = (date(year + (mon == 12), mon % 12 + 1, 1) - timedelta(days=1))
+    profile = get_or_create_profile(current_user["user_id"])
+    goal = float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
+    rows = fetch_meals(current_user["user_id"], first, last)
+    return ok("ดึงข้อมูลสำเร็จ", month_summary(to_meals(rows), goal, year, mon, today_local(), LOCAL_TZ))
+
+
+@app.get("/api/dashboard/alerts", tags=["อาหาร"])
+def dashboard_alerts(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    today = today_local()
+    profile = get_or_create_profile(user_id)
+    requirement = requirement_for(profile)
+    goal = float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
+    meals = to_meals(fetch_meals(user_id, today - timedelta(days=7), today))
+    weights = [
+        (datetime.fromisoformat(str(w["logged_at"]).replace("Z", "+00:00")), float(w["weight"]))
+        for w in fetch_weights(user_id, today - timedelta(days=28))
+    ]
+    data = build_alerts(
+        meals, weights, goal,
+        requirement.bmr if requirement else None,
+        profile.get("gender"), profile.get("goal"), today, LOCAL_TZ,
+    )
+    return ok("ดึงข้อมูลสำเร็จ", data)
+
+
+@app.post("/api/weight", tags=["ข้อมูลส่วนตัว"], status_code=status.HTTP_201_CREATED)
+def log_weight(entry: WeightLogRequest, current_user: dict = Depends(get_current_user)):
+    """บันทึกน้ำหนักวันนี้ และอัปเดตน้ำหนักในข้อมูลส่วนตัว (คำนวณแคลอรี่ต่อวันใหม่)"""
+    user_id = current_user["user_id"]
+    before = get_or_create_profile(user_id)
+    # update_profile บันทึก weight_logs ให้เมื่อน้ำหนักเปลี่ยน
+    profile = update_profile(ProfileUpdate(weight=entry.weight), current_user)["data"]
+    if _as_float(before.get("weight")) == _as_float(entry.weight):
+        # น้ำหนักเท่าเดิม ก็ยังเก็บเป็นจุดใหม่ในกราฟ
+        supabase.table("weight_logs").insert({"user_id": user_id, "weight": entry.weight}).execute()
+    return ok("บันทึกน้ำหนักสำเร็จ", profile)
+
+
+@app.get("/api/weight/history", tags=["ข้อมูลส่วนตัว"])
+def weight_history(
+    days: int = Query(default=90, ge=1, le=366),
+    current_user: dict = Depends(get_current_user),
+):
+    since = today_local() - timedelta(days=days)
+    return ok("ดึงข้อมูลสำเร็จ", fetch_weights(current_user["user_id"], since))
 
 
 # ==========================================
