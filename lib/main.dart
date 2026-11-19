@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -29,24 +30,57 @@ const kPurple = Color(0xFF8B5CF6);
 
 List<CameraDescription> cameras = [];
 
+const _useLocalAuth = bool.fromEnvironment(
+  'LOCAL_AUTH',
+  defaultValue: true,
+);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: '.env');
+  final initialization = _initializeAuth();
+  runApp(NutritionStartupApp(initialization: initialization));
+  unawaited(_loadCameras());
+}
+
+Future<AuthService> _initializeAuth() {
+  if (_useLocalAuth) return LocalAuthService.create();
+  return _initializeSupabase();
+}
+
+Future<AuthService> _initializeSupabase() async {
+  try {
+    await dotenv.load(fileName: 'assets/app.env');
+  } on Object catch (error) {
+    throw StateError(
+      'โหลดไฟล์ assets/app.env ไม่สำเร็จ (${error.runtimeType}) '
+      'ตรวจว่ามีไฟล์นี้ แล้ว build แอปใหม่',
+    );
+  }
   final supabaseUrl = dotenv.env['SUPABASE_URL']?.trim() ?? '';
   final publishableKey = dotenv.env['SUPABASE_PUBLISHABLE_KEY']?.trim() ?? '';
   if (supabaseUrl.isEmpty || publishableKey.isEmpty) {
-    runApp(const SupabaseSetupRequiredApp());
-    return;
+    throw StateError(
+      'ไม่พบ SUPABASE_URL หรือ SUPABASE_PUBLISHABLE_KEY ใน assets/app.env',
+    );
   }
-  await Supabase.initialize(url: supabaseUrl, publishableKey: publishableKey);
+  try {
+    await Supabase.initialize(url: supabaseUrl, publishableKey: publishableKey);
+  } on Object catch (error) {
+    throw StateError(
+      'เริ่มต้น Supabase ไม่สำเร็จ (${error.runtimeType}) '
+      'ตรวจ Project URL, Publishable key และการเชื่อมต่ออินเทอร์เน็ต',
+    );
+  }
+  return SupabaseAuthService(Supabase.instance.client);
+}
+
+Future<void> _loadCameras() async {
   try {
     cameras = await availableCameras();
-  } on CameraException {
+  } on CameraException catch (error) {
     cameras = [];
+    debugPrint('Camera initialization failed: $error');
   }
-  runApp(
-    NutritionApp(authService: SupabaseAuthService(Supabase.instance.client)),
-  );
 }
 
 // ───────────────────────── Admin Auth State ─────────────────────────
@@ -964,23 +998,43 @@ class AppContent extends ChangeNotifier {
 }
 
 // ───────────────────────── Root App ─────────────────────────
-class SupabaseSetupRequiredApp extends StatelessWidget {
-  const SupabaseSetupRequiredApp({super.key});
+class NutritionStartupApp extends StatelessWidget {
+  const NutritionStartupApp({super.key, required this.initialization});
+
+  final Future<AuthService> initialization;
 
   @override
-  Widget build(BuildContext context) => const MaterialApp(
-    home: Scaffold(
-      body: Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'ยังไม่ได้ตั้งค่า Supabase กรุณาใส่ Project URL และ '
-            'Publishable key ในไฟล์ .env แล้วเปิดแอปใหม่',
-            textAlign: TextAlign.center,
+  Widget build(BuildContext context) => FutureBuilder<AuthService>(
+    future: initialization,
+    builder: (context, snapshot) {
+      if (snapshot.hasData) {
+        return NutritionApp(authService: snapshot.requireData);
+      }
+      if (snapshot.hasError) {
+        final startupError = snapshot.error;
+        final details = startupError is StateError
+            ? startupError.message
+            : startupError?.runtimeType.toString() ?? 'ไม่ทราบสาเหตุ';
+        return MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'เริ่มต้น Supabase ไม่สำเร็จ\n$details',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
           ),
+        );
+      }
+      return const MaterialApp(
+        home: Scaffold(
+          body: Center(child: CircularProgressIndicator(color: kGreen)),
         ),
-      ),
-    ),
+      );
+    },
   );
 }
 

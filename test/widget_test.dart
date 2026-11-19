@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -6,6 +8,34 @@ import 'package:nutrition_app/auth_service.dart';
 import 'package:nutrition_app/main.dart';
 
 void main() {
+  testWidgets('shows startup progress until Supabase initializes', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final initialization = Completer<AuthService>();
+    await tester.pumpWidget(
+      NutritionStartupApp(initialization: initialization.future),
+    );
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    initialization.complete(MemoryAuthService());
+    await tester.pumpAndSettle();
+    expect(find.text('วิเคราะห์โภชนาการ'), findsOneWidget);
+  });
+
+  testWidgets('shows configuration guidance when startup fails', (
+    WidgetTester tester,
+  ) async {
+    final initialization = Completer<AuthService>();
+    await tester.pumpWidget(
+      NutritionStartupApp(initialization: initialization.future),
+    );
+    initialization.completeError(StateError('invalid config'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('invalid config'), findsOneWidget);
+  });
+
   testWidgets('Nutrition app opens and health setup route works', (
     WidgetTester tester,
   ) async {

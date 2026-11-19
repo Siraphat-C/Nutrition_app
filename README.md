@@ -14,13 +14,20 @@ Flutter application for nutrition tracking and food image capture.
 
 1. Install Flutter and the tooling for the target platform, then add Flutter's `bin` directory to `PATH`.
 2. Clone this repository and open a terminal in the repository root.
-3. Configure Supabase for local account registration:
+3. By default, the app uses local accounts and stores account, profile, and meal data on the device. Run it with:
 
    ```powershell
-   Copy-Item .env.example .env
+   flutter run -d <device_id>
    ```
 
-   Set `SUPABASE_URL` to the project's URL from **Supabase Dashboard → Project Settings → API**, and set `SUPABASE_PUBLISHABLE_KEY` to the project's publishable key. The app uses Supabase Auth for signup and login. Do not use a secret or `service_role` key in Flutter. The `.env` file is gitignored; its publishable key is still included in the local app build, so it is not a place for secrets.
+   Clearing the app's data or uninstalling it removes these local accounts and records. To use Supabase Auth instead, configure the asset:
+
+   ```powershell
+   New-Item -ItemType Directory -Force assets
+   Copy-Item .env.example assets/app.env
+   ```
+
+   Set `SUPABASE_URL` to the project's URL from **Supabase Dashboard → Project Settings → API**, and set `SUPABASE_PUBLISHABLE_KEY` to the project's publishable key. Add `--dart-define=LOCAL_AUTH=false` to a `flutter run` or `flutter build` command to opt into Supabase. Do not use a secret or `service_role` key in Flutter. The config file is gitignored; its publishable key is still included in the local app build, so it is not a place for secrets.
 
    Signup creates an account in Supabase Auth (`auth.users`) and stores the display name as user metadata. Nutrition profile and meal data remain local to the device; this change does not expose the database tables to the publishable key.
 
