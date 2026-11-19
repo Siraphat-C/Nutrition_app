@@ -379,7 +379,7 @@ class _WeightCard extends StatelessWidget {
           children: [
             SectionHeader('น้ำหนักเดือนนี้'),
             SizedBox(height: 6),
-            Text('ยังไม่มีบันทึกน้ำหนักในเดือนนี้ กด "บันทึกน้ำหนักวันนี้" ที่หน้าหลัก',
+            Text('เดือนนี้ยังไม่มีการเปลี่ยนน้ำหนัก แก้น้ำหนักได้ที่หน้าโปรไฟล์ → ร่างกายและเป้าหมาย',
                 style: TextStyle(fontSize: 13, color: kMuted, height: 1.5)),
           ],
         ),

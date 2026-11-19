@@ -201,12 +201,6 @@ class AppState extends ChangeNotifier {
     await refreshToday();
   }
 
-  Future<void> logWeight(double kg) async {
-    profile = await api.logWeight(kg);
-    notifyListeners();
-    await refreshDashboard();
-  }
-
   Future<void> _saveToken(String token) async {
     api.token = token;
     final prefs = await SharedPreferences.getInstance();

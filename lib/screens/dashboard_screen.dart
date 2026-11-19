@@ -363,82 +363,14 @@ class _BodyCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => showDialog<void>(context: context, builder: (_) => WeightDialog(current: weight)),
-              icon: const Icon(Icons.monitor_weight_outlined),
-              label: const Text('บันทึกน้ำหนักวันนี้'),
-            ),
+          const SizedBox(height: 8),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('น้ำหนักอัปเดตจากหน้าโปรไฟล์ ใช้วาดกราฟและแจ้งเตือนน้ำหนักลด/ขึ้นเร็ว',
+                style: TextStyle(fontSize: 12, color: kMuted)),
           ),
         ],
       ),
-    );
-  }
-}
-
-/// กรอกน้ำหนักวันนี้ ส่ง POST /api/weight
-class WeightDialog extends StatefulWidget {
-  final double? current;
-  const WeightDialog({super.key, this.current});
-
-  @override
-  State<WeightDialog> createState() => _WeightDialogState();
-}
-
-class _WeightDialogState extends State<WeightDialog> {
-  late final _ctrl = TextEditingController(text: widget.current?.toStringAsFixed(1) ?? '');
-  bool _busy = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final kg = double.tryParse(_ctrl.text.trim());
-    if (kg == null || kg < 20 || kg > 300) {
-      setState(() => _error = 'น้ำหนักต้องอยู่ระหว่าง 20–300 กก.');
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      await AppState.instance.logWeight(kg);
-      if (!mounted) return;
-      final messenger = ScaffoldMessenger.of(context);
-      Navigator.of(context).pop();
-      messenger.showSnackBar(const SnackBar(
-        content: Text('บันทึกน้ำหนักแล้ว แคลอรี่ต่อวันคำนวณใหม่ให้แล้ว'),
-        behavior: SnackBarBehavior.floating,
-      ));
-    } catch (e) {
-      setState(() => _error = '$e');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('น้ำหนักวันนี้'),
-      content: TextField(
-        controller: _ctrl,
-        autofocus: true,
-        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-        decoration: InputDecoration(suffixText: 'กก.', errorText: _error, errorMaxLines: 2),
-        onSubmitted: (_) => _save(),
-      ),
-      actions: [
-        TextButton(onPressed: _busy ? null : () => Navigator.pop(context), child: const Text('ยกเลิก')),
-        FilledButton(onPressed: _busy ? null : _save, child: const Text('บันทึก')),
-      ],
     );
   }
 }

@@ -169,10 +169,6 @@ class ApiClient {
   Future<Map<String, dynamic>> dashboardSummary(String month) async =>
       Map<String, dynamic>.from(await get('/api/dashboard/summary', {'month': month}));
 
-  /// บันทึกน้ำหนักวันนี้ คืนข้อมูลส่วนตัวที่อัปเดตแล้ว
-  Future<Map<String, dynamic>> logWeight(double weight) async =>
-      Map<String, dynamic>.from(await post('/api/weight', {'weight': weight}));
-
   // ---------- แอดมิน ----------
 
   /// {admin, stats: {total_users, total_admins, total_foods}}
