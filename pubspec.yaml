@@ -37,8 +37,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   image_picker: ^1.2.4
   camera: ^0.12.2
-  crypto: ^3.0.6
   shared_preferences: ^2.5.3
+  crypto: ^3.0.8
+  supabase_flutter: ^2.18.3
+  flutter_dotenv: ^6.0.2
 
 dev_dependencies:
   flutter_test:
@@ -61,6 +63,8 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/app.env
 
   # To add assets to your application, add an assets section, like this:
   # assets:

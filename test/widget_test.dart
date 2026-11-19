@@ -1,15 +1,46 @@
+import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'package:nutrition_app/auth_service.dart';
 import 'package:nutrition_app/main.dart';
 
 void main() {
+  testWidgets('shows startup progress until Supabase initializes', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final initialization = Completer<AuthService>();
+    await tester.pumpWidget(
+      NutritionStartupApp(initialization: initialization.future),
+    );
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+    initialization.complete(MemoryAuthService());
+    await tester.pumpAndSettle();
+    expect(find.text('วิเคราะห์โภชนาการ'), findsOneWidget);
+  });
+
+  testWidgets('shows configuration guidance when startup fails', (
+    WidgetTester tester,
+  ) async {
+    final initialization = Completer<AuthService>();
+    await tester.pumpWidget(
+      NutritionStartupApp(initialization: initialization.future),
+    );
+    initialization.completeError(StateError('invalid config'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('invalid config'), findsOneWidget);
+  });
+
   testWidgets('Nutrition app opens and health setup route works', (
     WidgetTester tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(const NutritionApp());
+    await tester.pumpWidget(NutritionApp(authService: MemoryAuthService()));
     await tester.pumpAndSettle();
 
     expect(find.text('วิเคราะห์โภชนาการ'), findsOneWidget);
@@ -34,7 +65,8 @@ void main() {
     WidgetTester tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
-    final content = AppContent();
+    final auth = MemoryAuthService();
+    final content = AppContent(authService: auth);
     await content.initialize();
     content.startNewAccount(
       name: 'นักทดสอบ ผู้ใช้',
@@ -46,7 +78,7 @@ void main() {
     await content.completeRegistration();
     await content.logout();
 
-    await tester.pumpWidget(const NutritionApp());
+    await tester.pumpWidget(NutritionApp(authService: auth));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).at(0), 'tester@example.com');
     await tester.enterText(find.byType(TextField).at(1), 'password123');
@@ -63,9 +95,8 @@ void main() {
     expect(find.text('คำแนะนำและการวิเคราะห์'), findsOneWidget);
     expect(find.byType(NextMealRecommendationCard), findsOneWidget);
 
-    Navigator.of(
-      tester.element(find.text('คำแนะนำและการวิเคราะห์')),
-    ).pushNamed('/stats');
+    Navigator.of(tester.element(find.text('คำแนะนำและการวิเคราะห์')))
+        .pushNamed('/stats');
     await tester.pumpAndSettle();
     expect(find.text('เปรียบเทียบและสถิติพลังงาน'), findsOneWidget);
 
@@ -83,7 +114,8 @@ void main() {
     'accounts persist and validate credentials across app instances',
     () async {
       SharedPreferences.setMockInitialValues({});
-      final firstApp = AppContent();
+      final auth = MemoryAuthService();
+      final firstApp = AppContent(authService: auth);
       await firstApp.initialize();
 
       expect(
@@ -125,7 +157,7 @@ void main() {
       );
       await firstApp.logout();
 
-      final secondApp = AppContent();
+      final secondApp = AppContent(authService: auth);
       await secondApp.initialize();
       expect(secondApp.isLoggedIn, isFalse);
       expect(
@@ -149,11 +181,83 @@ void main() {
         hasLength(1),
       );
 
-      final restoredApp = AppContent();
+      final restoredApp = AppContent(authService: auth);
       await restoredApp.initialize();
       expect(restoredApp.isLoggedIn, isTrue);
       expect(restoredApp.email, 'updated@example.com');
       await restoredApp.logout();
     },
   );
+}
+
+class MemoryAuthService implements AuthService {
+  final Map<String, ({String name, String password})> _accounts = {};
+  String? _email;
+
+  @override
+  String? get currentEmail => _email;
+
+  @override
+  String? get currentName => _email == null ? null : _accounts[_email]?.name;
+
+  @override
+  Future<bool> signUp({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final normalizedEmail = email.toLowerCase();
+    if (_accounts.containsKey(normalizedEmail)) {
+      throw StateError('อีเมลนี้มีบัญชีอยู่แล้ว');
+    }
+    _accounts[normalizedEmail] = (name: name, password: password);
+    _email = normalizedEmail;
+    return true;
+  }
+
+  @override
+  Future<bool> signIn({required String email, required String password}) async {
+    final normalizedEmail = email.toLowerCase();
+    if (_accounts[normalizedEmail]?.password != password) {
+      return false;
+    }
+    _email = normalizedEmail;
+    return true;
+  }
+
+  @override
+  Future<void> signOut() async {
+    _email = null;
+  }
+
+  @override
+  Future<String?> updateEmail(String email) async {
+    final account = _accounts.remove(_email);
+    if (account == null) return null;
+    final normalizedEmail = email.toLowerCase();
+    _accounts[normalizedEmail] = account;
+    _email = normalizedEmail;
+    return normalizedEmail;
+  }
+
+  @override
+  Future<void> updateName(String name) async {
+    if (_email == null) return;
+    _accounts[_email!] = (name: name, password: _accounts[_email!]!.password);
+  }
+
+  @override
+  Future<bool> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    if (_email == null || _accounts[_email!]?.password != oldPassword) {
+      return false;
+    }
+    _accounts[_email!] = (
+      name: _accounts[_email!]!.name,
+      password: newPassword,
+    );
+    return true;
+  }
 }
