@@ -1,7 +1,12 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:camera/camera.dart';
+import 'package:crypto/crypto.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ───────────────────────── Type Definitions ─────────────────────────
 typedef StringMap = Map<String, String>;
@@ -55,8 +60,16 @@ class AdminAuth extends ChangeNotifier {
 // ───────────────────────── App Data State ─────────────────────────
 class AppContent extends ChangeNotifier {
   final Map<String, StringMap> users = {
-    '6701': {'name': 'แคทเธอรีน ภูชาง', 'email': 'Doradaymon@gmail.com', 'role': 'ผู้ใช้งาน'},
-    '6702': {'name': 'ปิติโชค โดราเอม่อน', 'email': 'user2@gmail.com', 'role': 'ผู้ใช้งาน'},
+    '6701': {
+      'name': 'แคทเธอรีน ภูชาง',
+      'email': 'Doradaymon@gmail.com',
+      'role': 'ผู้ใช้งาน',
+    },
+    '6702': {
+      'name': 'ปิติโชค โดราเอม่อน',
+      'email': 'user2@gmail.com',
+      'role': 'ผู้ใช้งาน',
+    },
   };
 
   final List<StringMap> foods = [
@@ -146,16 +159,318 @@ class AppContent extends ChangeNotifier {
   final Map<String, List<DynamicMap>> mealsByDate = {};
 
   DateTime selectedDate = DateTime.now();
-  DateTime? birthDate = DateTime(1997, 3, 14);
-  String fullName = 'แคทเธอรีน ภูชาง';
-  String email = 'Doradaymon@gmail.com';
-  double weightKg = 55.0;
-  double heightCm = 165.0;
+  DateTime? birthDate;
+  String fullName = '';
+  String email = '';
+  double weightKg = 0;
+  double heightCm = 0;
   String gender = 'หญิง';
   String activityLevel = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
   String goalType = 'ลดน้ำหนัก';
+  SharedPreferences? _preferences;
+  final List<DynamicMap> _accounts = [];
+  String? _currentAccountEmail;
+  String? _pendingName;
+  String? _pendingEmail;
+  String? _pendingPassword;
+
+  bool get isLoggedIn => _currentAccountEmail != null;
+
+  static const _accountsKey = 'nutrition_accounts_v1';
+  static const _sessionKey = 'nutrition_current_account';
+
+  Future<void> initialize() async {
+    _preferences = await SharedPreferences.getInstance();
+    final storedAccounts = _preferences!.getString(_accountsKey);
+    if (storedAccounts != null) {
+      final decoded = jsonDecode(storedAccounts);
+      if (decoded is! List) {
+        throw const FormatException('ข้อมูลบัญชีในเครื่องมีรูปแบบไม่ถูกต้อง');
+      }
+      _accounts
+        ..clear()
+        ..addAll(decoded.map((item) => Map<String, dynamic>.from(item as Map)));
+    }
+
+    final savedEmail = _preferences!.getString(_sessionKey);
+    final account = _findAccount(savedEmail);
+    if (account != null) {
+      _loadAccount(account);
+    } else if (savedEmail != null) {
+      await _preferences!.remove(_sessionKey);
+    }
+  }
+
+  DynamicMap? _findAccount(String? accountEmail) {
+    if (accountEmail == null) return null;
+    final normalizedEmail = accountEmail.trim().toLowerCase();
+    for (final account in _accounts) {
+      if ((account['email'] as String).toLowerCase() == normalizedEmail) {
+        return account;
+      }
+    }
+    return null;
+  }
+
+  bool startNewAccount({
+    required String name,
+    required String newEmail,
+    required String password,
+  }) {
+    final normalizedEmail = newEmail.trim().toLowerCase();
+    if (_findAccount(normalizedEmail) != null) return false;
+
+    _pendingName = name.trim();
+    _pendingEmail = normalizedEmail;
+    _pendingPassword = password;
+    fullName = _pendingName!;
+    email = normalizedEmail;
+    birthDate = null;
+    weightKg = 0;
+    heightCm = 0;
+    gender = 'หญิง';
+    activityLevel = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
+    goalType = 'รักษาน้ำหนัก';
+    mealsByDate.clear();
+    selectedDate = DateTime.now();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> completeRegistration() async {
+    final name = _pendingName;
+    final pendingEmail = _pendingEmail;
+    final password = _pendingPassword;
+    if (name == null || pendingEmail == null || password == null) {
+      throw StateError('ไม่พบข้อมูลสมัครสมาชิก กรุณาเริ่มสมัครใหม่');
+    }
+    if (_findAccount(pendingEmail) != null) {
+      throw StateError('อีเมลนี้มีบัญชีอยู่แล้ว');
+    }
+
+    final salt = _newSalt();
+    final account = <String, dynamic>{
+      'name': name,
+      'email': pendingEmail,
+      'passwordSalt': salt,
+      'passwordHash': _hashPassword(password, salt),
+    };
+    _writeAccountData(account);
+    _accounts.add(account);
+    try {
+      await _saveAccounts();
+      await _saveSession(pendingEmail);
+    } catch (_) {
+      _accounts.remove(account);
+      await _saveAccounts();
+      rethrow;
+    }
+    _currentAccountEmail = pendingEmail;
+    _pendingName = null;
+    _pendingEmail = null;
+    _pendingPassword = null;
+    notifyListeners();
+  }
+
+  Future<bool> login(String accountEmail, String password) async {
+    final account = _findAccount(accountEmail);
+    if (account == null) return false;
+    final salt = account['passwordSalt'];
+    final savedHash = account['passwordHash'];
+    if (salt is! String ||
+        savedHash is! String ||
+        !_passwordsMatch(_hashPassword(password, salt), savedHash)) {
+      return false;
+    }
+
+    final normalizedEmail = account['email'] as String;
+    await _saveSession(normalizedEmail);
+    _loadAccount(account);
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> logout() async {
+    final removed = await _preferences!.remove(_sessionKey);
+    if (!removed) throw StateError('ลบสถานะการเข้าสู่ระบบไม่สำเร็จ');
+    _currentAccountEmail = null;
+    notifyListeners();
+  }
+
+  Future<bool> updateAccountInfo({
+    String? name,
+    String? newEmail,
+    DateTime? newBirthDate,
+  }) async {
+    final normalizedEmail = newEmail?.trim().toLowerCase();
+    if (normalizedEmail != null &&
+        normalizedEmail != _currentAccountEmail &&
+        _findAccount(normalizedEmail) != null) {
+      return false;
+    }
+    final currentAccount = _findAccount(_currentAccountEmail);
+    if (name != null && name.isNotEmpty) fullName = name;
+    if (normalizedEmail != null && normalizedEmail.isNotEmpty) {
+      if (currentAccount != null) currentAccount['email'] = normalizedEmail;
+      email = normalizedEmail;
+      if (currentAccount != null) _currentAccountEmail = normalizedEmail;
+    }
+    if (newBirthDate != null) birthDate = newBirthDate;
+    await _persistCurrentAccount();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> updateHealthProfile({
+    double? weight,
+    double? height,
+    String? userGender,
+    String? activity,
+    String? targetType,
+  }) async {
+    if (weight != null) weightKg = weight;
+    if (height != null) heightCm = height;
+    if (userGender != null) gender = userGender;
+    if (activity != null) activityLevel = activity;
+    if (targetType != null) goalType = targetType;
+    await _persistCurrentAccount();
+    notifyListeners();
+  }
+
+  Future<bool> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    final account = _findAccount(_currentAccountEmail);
+    if (account == null) return false;
+    final salt = account['passwordSalt'] as String;
+    if (!_passwordsMatch(
+      _hashPassword(oldPassword, salt),
+      account['passwordHash'] as String,
+    )) {
+      return false;
+    }
+    final newSalt = _newSalt();
+    account['passwordSalt'] = newSalt;
+    account['passwordHash'] = _hashPassword(newPassword, newSalt);
+    await _saveAccounts();
+    return true;
+  }
+
+  String _newSalt() {
+    final random = Random.secure();
+    return List<int>.generate(
+      16,
+      (_) => random.nextInt(256),
+    ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  String _hashPassword(String password, String salt) {
+    final hmac = Hmac(sha256, utf8.encode(password));
+    final saltBytes = List<int>.generate(
+      salt.length ~/ 2,
+      (index) => int.parse(salt.substring(index * 2, index * 2 + 2), radix: 16),
+    );
+    var block = hmac.convert([...saltBytes, 0, 0, 0, 1]).bytes;
+    final derivedKey = List<int>.from(block);
+    for (var iteration = 1; iteration < 50000; iteration++) {
+      block = hmac.convert(block).bytes;
+      for (var index = 0; index < derivedKey.length; index++) {
+        derivedKey[index] ^= block[index];
+      }
+    }
+    return derivedKey
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+
+  bool _passwordsMatch(String actual, String expected) {
+    if (actual.length != expected.length) return false;
+    var difference = 0;
+    for (var index = 0; index < actual.length; index++) {
+      difference |= actual.codeUnitAt(index) ^ expected.codeUnitAt(index);
+    }
+    return difference == 0;
+  }
+
+  void _loadAccount(DynamicMap account) {
+    _currentAccountEmail = account['email'] as String;
+    fullName = account['name'] as String;
+    email = _currentAccountEmail!;
+    birthDate = DateTime.tryParse(account['birthDate'] as String? ?? '');
+    weightKg = (account['weightKg'] as num?)?.toDouble() ?? 0;
+    heightCm = (account['heightCm'] as num?)?.toDouble() ?? 0;
+    gender = account['gender'] as String? ?? 'หญิง';
+    activityLevel =
+        account['activityLevel'] as String? ?? 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
+    goalType = account['goalType'] as String? ?? 'รักษาน้ำหนัก';
+    final storedMeals = account['mealsByDate'];
+    mealsByDate
+      ..clear()
+      ..addAll(
+        storedMeals is Map
+            ? storedMeals.map(
+                (key, value) => MapEntry(
+                  key.toString(),
+                  (value as List)
+                      .map((meal) => Map<String, dynamic>.from(meal as Map))
+                      .toList(),
+                ),
+              )
+            : <String, List<DynamicMap>>{},
+      );
+    selectedDate = DateTime.now();
+  }
+
+  void _writeAccountData(DynamicMap account) {
+    account
+      ..['name'] = fullName
+      ..['email'] = email
+      ..['birthDate'] = birthDate?.toIso8601String()
+      ..['weightKg'] = weightKg
+      ..['heightCm'] = heightCm
+      ..['gender'] = gender
+      ..['activityLevel'] = activityLevel
+      ..['goalType'] = goalType
+      ..['mealsByDate'] = mealsByDate;
+  }
+
+  Future<void> _persistCurrentAccount() async {
+    final account = _findAccount(_currentAccountEmail);
+    if (account == null) return;
+    _writeAccountData(account);
+    await _saveAccounts();
+    await _saveSession(_currentAccountEmail!);
+  }
+
+  Future<void> _saveSession(String accountEmail) async {
+    final saved = await _preferences!.setString(_sessionKey, accountEmail);
+    if (!saved) throw StateError('บันทึกสถานะการเข้าสู่ระบบไม่สำเร็จ');
+  }
+
+  Future<void> _saveAccounts() async {
+    final saved = await _preferences!.setString(
+      _accountsKey,
+      jsonEncode(_accounts),
+    );
+    if (!saved) throw StateError('บันทึกข้อมูลบัญชีลงในอุปกรณ์ไม่สำเร็จ');
+  }
 
   double get dailyGoal => calculateRecommendedTDEE();
+  double get basalMetabolicRate {
+    final weight = weightKg > 0 ? weightKg : 55.0;
+    final height = heightCm > 0 ? heightCm : 165.0;
+    return _calculateBmr(weight, height, gender);
+  }
+
+  double get maintenanceTdee =>
+      calculateRecommendedTDEE(forGoal: 'รักษาน้ำหนัก');
+
+  double _calculateBmr(double weight, double height, String userGender) {
+    return userGender == 'ชาย'
+        ? (10 * weight) + (6.25 * height) - (5 * age) + 5
+        : (10 * weight) + (6.25 * height) - (5 * age) - 161;
+  }
 
   AppContent() {
     final now = DateTime.now();
@@ -274,18 +589,26 @@ class AppContent extends ChangeNotifier {
 
   double caloriesForDate(DateTime date) {
     final list = mealsByDate[dateKey(date)] ?? [];
-    return list.fold(0.0, (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0));
+    return list.fold(
+      0.0,
+      (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0),
+    );
   }
 
   double caloriesByMealType(String mealType) {
     return currentMeals
         .where((m) => (m['mealType'] as String? ?? 'มื้อว่าง') == mealType)
-        .fold(0.0, (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0));
+        .fold(
+          0.0,
+          (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0),
+        );
   }
 
   // ── ระบุชื่อมื้อถัดไปอัตโนมัติจากมื้อที่บันทึกแล้วหรือเวลาปัจจุบัน ──
   String get suggestedNextMealType {
-    final loggedTypes = currentMeals.map((m) => m['mealType'] as String? ?? '').toSet();
+    final loggedTypes = currentMeals
+        .map((m) => m['mealType'] as String? ?? '')
+        .toSet();
     final hour = DateTime.now().hour;
 
     if (!loggedTypes.contains('มื้อเช้า') && hour < 11) return 'มื้อเช้า';
@@ -310,7 +633,8 @@ class AppContent extends ChangeNotifier {
           'energy': 0.0,
           'serving': '1 แก้ว (250 มล.)',
           'category': 'เครื่องดื่มปลอดแคลอรี่',
-          'fitReason': 'โควตาวันนี้เต็มแล้ว เหมาะสำหรับดื่มเพื่อลดความอยากอาหาร',
+          'fitReason':
+              'โควตาวันนี้เต็มแล้ว เหมาะสำหรับดื่มเพื่อลดความอยากอาหาร',
         },
         {
           'id': 'low_2',
@@ -323,22 +647,25 @@ class AppContent extends ChangeNotifier {
       ];
     }
 
-    final candidates = foods.map((f) {
-      final kcal = double.tryParse(f['energy'] ?? '0') ?? 0.0;
-      return {
-        'id': f['id'] ?? '',
-        'name': f['name'] ?? '',
-        'energy': kcal,
-        'serving': f['serving'] ?? '1 จาน',
-        'category': f['category'] ?? 'อาหารทั่วไป',
-      };
-    }).where((item) {
-      final kcal = item['energy'] as double;
-      final name = item['name'] as String;
-      if (kcal <= 0 || kcal > remaining) return false;
-      if (excludeMenuName != null && name == excludeMenuName) return false;
-      return true;
-    }).toList();
+    final candidates = foods
+        .map((f) {
+          final kcal = double.tryParse(f['energy'] ?? '0') ?? 0.0;
+          return {
+            'id': f['id'] ?? '',
+            'name': f['name'] ?? '',
+            'energy': kcal,
+            'serving': f['serving'] ?? '1 จาน',
+            'category': f['category'] ?? 'อาหารทั่วไป',
+          };
+        })
+        .where((item) {
+          final kcal = item['energy'] as double;
+          final name = item['name'] as String;
+          if (kcal <= 0 || kcal > remaining) return false;
+          if (excludeMenuName != null && name == excludeMenuName) return false;
+          return true;
+        })
+        .toList();
 
     // จัดลำดับเมนูที่เหมาะสมตามเป้าหมายของผู้ใช้
     if (goalType.contains('ลดน้ำหนัก')) {
@@ -351,7 +678,9 @@ class AppContent extends ChangeNotifier {
       });
     } else if (goalType.contains('เพิ่มน้ำหนัก')) {
       // เพิ่มน้ำหนัก: เรียงเมนูพลังงานสูงที่อยู่ในโควตาขึ้นก่อน
-      candidates.sort((a, b) => (b['energy'] as double).compareTo(a['energy'] as double));
+      candidates.sort(
+        (a, b) => (b['energy'] as double).compareTo(a['energy'] as double),
+      );
     } else {
       // รักษาน้ำหนัก: เรียงเมนูที่ใกล้เคียง 35% ของเป้าหมายวัน (ประมาณ 1 มื้อมาตรฐาน)
       final idealMeal = dailyGoal * 0.35;
@@ -365,10 +694,13 @@ class AppContent extends ChangeNotifier {
     return candidates.take(limit).map((item) {
       final kcal = item['energy'] as double;
       final leftAfter = (remaining - kcal).clamp(0.0, 9999.0);
-      final pctOfRemaining = remaining > 0 ? ((kcal / remaining) * 100).round() : 0;
+      final pctOfRemaining = remaining > 0
+          ? ((kcal / remaining) * 100).round()
+          : 0;
       return {
         ...item,
-        'fitReason': 'ใช้ $pctOfRemaining% ของโควตาคงเหลือ • ทานแล้วจะเหลืออีก ${leftAfter.toStringAsFixed(0)} kcal',
+        'fitReason':
+            'ใช้ $pctOfRemaining% ของโควตาคงเหลือ • ทานแล้วจะเหลืออีก ${leftAfter.toStringAsFixed(0)} kcal',
       };
     }).toList();
   }
@@ -387,13 +719,18 @@ class AppContent extends ChangeNotifier {
     return activeDays > 0 ? (sum / activeDays) : 0.0;
   }
 
-  double get totalDailyCalories =>
-      currentMeals.fold(0.0, (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0));
+  double get totalDailyCalories => currentMeals.fold(
+    0.0,
+    (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0),
+  );
 
   double get previousDayCalories {
     final prevKey = dateKey(selectedDate.subtract(const Duration(days: 1)));
     final prevMeals = mealsByDate[prevKey] ?? [];
-    return prevMeals.fold(0.0, (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0));
+    return prevMeals.fold(
+      0.0,
+      (sum, item) => sum + ((item['calories'] as num?)?.toDouble() ?? 0.0),
+    );
   }
 
   double? get currentBmi {
@@ -430,9 +767,7 @@ class AppContent extends ChangeNotifier {
         ? forHeight
         : (heightCm > 0 ? heightCm : 165.0);
 
-    final double bmr = gGender == 'ชาย'
-        ? (10 * w) + (6.25 * h) - (5 * age) + 5
-        : (10 * w) + (6.25 * h) - (5 * age) - 161;
+    final double bmr = _calculateBmr(w, h, gGender);
 
     double multiplier = 1.375;
     if (actLevel.contains('น้อย')) multiplier = 1.2;
@@ -462,19 +797,25 @@ class AppContent extends ChangeNotifier {
       final diff = today - prev;
       if (diff.abs() < 50) {
         trendTitle = 'ปริมาณการกินใกล้เคียงเมื่อวาน';
-        trendDetail = 'วันนี้ทานไป ${today.toStringAsFixed(0)} kcal (เมื่อวาน ${prev.toStringAsFixed(0)} kcal)';
+        trendDetail =
+            'วันนี้ทานไป ${today.toStringAsFixed(0)} kcal (เมื่อวาน ${prev.toStringAsFixed(0)} kcal)';
       } else if (diff > 0) {
         isMore = true;
-        trendTitle = 'วันนี้กินมากขึ้นกว่าเมื่อวาน +${diff.toStringAsFixed(0)} kcal';
-        trendDetail = 'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal เทียบกับเมื่อวาน ${prev.toStringAsFixed(0)} kcal';
+        trendTitle =
+            'วันนี้กินมากขึ้นกว่าเมื่อวาน +${diff.toStringAsFixed(0)} kcal';
+        trendDetail =
+            'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal เทียบกับเมื่อวาน ${prev.toStringAsFixed(0)} kcal';
       } else {
-        trendTitle = 'วันนี้กินน้อยลงกว่าเมื่อวาน ${diff.abs().toStringAsFixed(0)} kcal';
-        trendDetail = 'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal เทียบกับเมื่อวาน ${prev.toStringAsFixed(0)} kcal';
+        trendTitle =
+            'วันนี้กินน้อยลงกว่าเมื่อวาน ${diff.abs().toStringAsFixed(0)} kcal';
+        trendDetail =
+            'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal เทียบกับเมื่อวาน ${prev.toStringAsFixed(0)} kcal';
       }
     } else {
       final pct = goal > 0 ? ((today / goal) * 100).round() : 0;
       trendTitle = 'สะสมพลังงานแล้ว $pct% ของเป้าหมาย';
-      trendDetail = 'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal จากเป้าหมาย ${goal.toStringAsFixed(0)} kcal';
+      trendDetail =
+          'ทานไปแล้ว ${today.toStringAsFixed(0)} kcal จากเป้าหมาย ${goal.toStringAsFixed(0)} kcal';
     }
 
     String mealHighlight = '';
@@ -517,14 +858,11 @@ class AppContent extends ChangeNotifier {
         statusType = 'danger';
         suitabilityText =
             'พลังงานเกินโควตาลดน้ำหนัก ${remaining.abs().toStringAsFixed(0)} kcal หากทานเกินต่อเนื่องจะทำให้น้ำหนักลดช้าลง';
-        foodChoiceAdvice =
-            'วันนี้ทานเกินโควตาแล้ว แนะนำหยุดทานอาหารพลังงานสูง เน้นดื่มน้ำเปล่าหรือชาไม่หวาน';
+        foodChoiceAdvice = 'วันนี้ทานเกินโควตาแล้ว แนะนำหยุดทานอาหารพลังงานสูง เน้นดื่มน้ำเปล่าหรือชาไม่หวาน';
       } else if (today > 0 && today < 1000 && currentMeals.length >= 2) {
         statusType = 'warning';
-        suitabilityText =
-            'พลังงานยังน้อยเกินไปสำหรับเกณฑ์ลดน้ำหนักที่ปลอดภัย (ควรทานอย่างน้อย 1,200 kcal/วัน)';
-        foodChoiceAdvice =
-            'ตอนนี้ยังทานน้อยไป แนะนำเลือกทานเมนูสุขภาพเพิ่ม เช่น สุกี้น้ำ อกไก่ย่าง หรือเกาเหลา';
+        suitabilityText = 'พลังงานยังน้อยเกินไปสำหรับเกณฑ์ลดน้ำหนักที่ปลอดภัย (ควรทานอย่างน้อย 1,200 kcal/วัน)';
+        foodChoiceAdvice = 'ตอนนี้ยังทานน้อยไป แนะนำเลือกทานเมนูสุขภาพเพิ่ม เช่น สุกี้น้ำ อกไก่ย่าง หรือเกาเหลา';
       } else {
         statusType = 'normal';
         suitabilityText =
@@ -543,12 +881,12 @@ class AppContent extends ChangeNotifier {
         statusType = 'warning';
         suitabilityText =
             'พลังงานยังไม่ถึงเกณฑ์เพิ่มน้ำหนัก ขาดอีก ${remaining.toStringAsFixed(0)} kcal';
-        foodChoiceAdvice =
-            'ยังทานน้อยไปสำหรับสายเพิ่มน้ำหนัก แนะนำเพิ่มมื้อว่างที่มีประโยชน์ เช่น นมถั่วเหลือง กล้วยหอม หรือไข่ต้ม';
+        foodChoiceAdvice = 'ยังทานน้อยไปสำหรับสายเพิ่มน้ำหนัก แนะนำเพิ่มมื้อว่างที่มีประโยชน์ เช่น นมถั่วเหลือง กล้วยหอม หรือไข่ต้ม';
       } else {
         statusType = 'normal';
         suitabilityText = 'ยอดเยี่ยม! พลังงานถึงเกณฑ์เพิ่มน้ำหนักอย่างเหมาะสม ช่วยเสริมสร้างร่างกายได้ดี';
-        foodChoiceAdvice = 'รักษาระดับการทานอาหารให้ครบมื้อและสม่ำเสมอในแต่ละวัน';
+        foodChoiceAdvice =
+            'รักษาระดับการทานอาหารให้ครบมื้อและสม่ำเสมอในแต่ละวัน';
       }
     } else {
       if (today > goal + 150) {
@@ -560,7 +898,8 @@ class AppContent extends ChangeNotifier {
         statusType = 'normal';
         suitabilityText =
             'สมดุลดีมาก เหมาะสมกับการรักษาน้ำหนักคงที่ เหลืออีก ${remaining.clamp(0, 9999).toStringAsFixed(0)} kcal';
-        foodChoiceAdvice = 'เลือกทานอาหารให้หลากหลาย ลดหวานมันเค็ม เพื่อรักษาสมดุลร่างกาย';
+        foodChoiceAdvice =
+            'เลือกทานอาหารให้หลากหลาย ลดหวานมันเค็ม เพื่อรักษาสมดุลร่างกาย';
       }
     }
 
@@ -572,59 +911,19 @@ class AppContent extends ChangeNotifier {
     };
   }
 
-  void startNewAccount({required String name, required String newEmail}) {
-    fullName = name;
-    email = newEmail;
-    birthDate = DateTime(2000, 1, 1);
-    weightKg = 0;
-    heightCm = 0;
-    gender = 'หญิง';
-    activityLevel = 'ปานกลาง (ออกกำลังกายสม่ำเสมอ)';
-    goalType = 'รักษาน้ำหนัก';
-    mealsByDate.clear();
-    selectedDate = DateTime.now();
-    notifyListeners();
-  }
-
   void setSelectedDate(DateTime date) {
     selectedDate = date;
     notifyListeners();
   }
 
-  void updateAccountInfo({
-    String? name,
-    String? newEmail,
-    DateTime? newBirthDate,
-  }) {
-    if (name != null && name.isNotEmpty) fullName = name;
-    if (newEmail != null && newEmail.isNotEmpty) email = newEmail;
-    if (newBirthDate != null) birthDate = newBirthDate;
-    notifyListeners();
-  }
-
-  void updateHealthProfile({
-    double? weight,
-    double? height,
-    String? userGender,
-    String? activity,
-    String? targetType,
-  }) {
-    if (weight != null) weightKg = weight;
-    if (height != null) heightCm = height;
-    if (userGender != null) gender = userGender;
-    if (activity != null) activityLevel = activity;
-    if (targetType != null) goalType = targetType;
-    notifyListeners();
-  }
-
-  void logMeal({
+  Future<void> logMeal({
     required String name,
     required double calories,
     int? weightGrams,
     String mealType = 'มื้ออาหาร',
     TimeOfDay? customTime,
     DateTime? targetDate,
-  }) {
+  }) async {
     final t = customTime ?? TimeOfDay.now();
     final timeStr =
         '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
@@ -639,15 +938,17 @@ class AppContent extends ChangeNotifier {
       'mealType': mealType,
       'time': timeStr,
     });
+    await _persistCurrentAccount();
     notifyListeners();
   }
 
-  void deleteMeal(String id, {String? fromDateKey}) {
+  Future<void> deleteMeal(String id, {String? fromDateKey}) async {
     final key = fromDateKey ?? dateKey(selectedDate);
     mealsByDate[key]?.removeWhere((m) => m['id'] == id);
     if (mealsByDate[key]?.isEmpty ?? false) {
       mealsByDate.remove(key);
     }
+    await _persistCurrentAccount();
     notifyListeners();
   }
 
@@ -690,45 +991,80 @@ class NutritionApp extends StatefulWidget {
 class _NutritionAppState extends State<NutritionApp> {
   final _auth = AdminAuth();
   final _content = AppContent();
+  late final Future<void> _initialization;
+
+  @override
+  void initState() {
+    super.initState();
+    _initialization = _content.initialize();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: Listenable.merge([_auth, _content]),
-      builder: (context, _) => _Providers(
-        auth: _auth,
-        content: _content,
-        child: MaterialApp(
-          title: 'วิเคราะห์โภชนาการ',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            scaffoldBackgroundColor: Colors.white,
-            colorScheme: ColorScheme.fromSeed(seedColor: kGreen, primary: kGreen),
-            useMaterial3: true,
+    return FutureBuilder<void>(
+      future: _initialization,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return MaterialApp(
+            home: Scaffold(
+              body: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('เปิดข้อมูลบัญชีไม่สำเร็จ: ${snapshot.error}'),
+                ),
+              ),
+            ),
+          );
+        }
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const MaterialApp(
+            home: Scaffold(
+              body: Center(child: CircularProgressIndicator(color: kGreen)),
+            ),
+          );
+        }
+        return ListenableBuilder(
+          listenable: Listenable.merge([_auth, _content]),
+          builder: (context, _) => _Providers(
+            auth: _auth,
+            content: _content,
+            child: MaterialApp(
+              title: 'วิเคราะห์โภชนาการ',
+              debugShowCheckedModeBanner: false,
+              theme: ThemeData(
+                scaffoldBackgroundColor: Colors.white,
+                colorScheme: ColorScheme.fromSeed(
+                  seedColor: kGreen,
+                  primary: kGreen,
+                ),
+                useMaterial3: true,
+              ),
+              initialRoute: _content.isLoggedIn ? '/home' : '/',
+              routes: {
+                '/': (_) => const IntroScreen(),
+                '/register': (_) => const RegisterScreen(),
+                '/dob': (_) => const DobScreen(),
+                '/health': (_) => const HealthScreen(),
+                '/goal': (_) => const GoalScreen(),
+                '/home': (_) => const DashboardScreen(),
+                '/insights': (_) => const InsightsScreen(),
+                '/stats': (_) => const StatsScreen(),
+                '/history': (_) => const MealHistoryScreen(),
+                '/capture': (_) => const CaptureScreen(),
+                '/analysis': (_) => const AnalysisScreen(),
+                '/profile': (_) => const ProfileScreen(),
+                '/change_password': (_) => const ChangePasswordScreen(),
+                '/account': (_) => const AccountScreen(),
+                '/admin/home': (_) => const AdminHomeScreen(),
+                '/admin/users': (_) => const AdminUsersScreen(),
+                '/admin/users/edit': (_) => const AdminEditUserScreen(),
+                '/admin/foods': (_) => const AdminFoodsScreen(),
+                '/admin/foods/add': (_) => const AdminAddFoodScreen(),
+              },
+            ),
           ),
-          initialRoute: '/',
-          routes: {
-            '/': (_) => const IntroScreen(),
-            '/register': (_) => const RegisterScreen(),
-            '/dob': (_) => const DobScreen(),
-            '/health': (_) => const HealthScreen(),
-            '/goal': (_) => const GoalScreen(),
-            '/home': (_) => const DashboardScreen(),
-            '/stats': (_) => const StatsScreen(),
-            '/history': (_) => const MealHistoryScreen(),
-            '/capture': (_) => const CaptureScreen(),
-            '/analysis': (_) => const AnalysisScreen(),
-            '/profile': (_) => const ProfileScreen(),
-            '/change_password': (_) => const ChangePasswordScreen(),
-            '/account': (_) => const AccountScreen(),
-            '/admin/home': (_) => const AdminHomeScreen(),
-            '/admin/users': (_) => const AdminUsersScreen(),
-            '/admin/users/edit': (_) => const AdminEditUserScreen(),
-            '/admin/foods': (_) => const AdminFoodsScreen(),
-            '/admin/foods/add': (_) => const AdminAddFoodScreen(),
-          },
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -737,7 +1073,11 @@ class _NutritionAppState extends State<NutritionApp> {
 class _Providers extends InheritedWidget {
   final AdminAuth auth;
   final AppContent content;
-  const _Providers({required this.auth, required this.content, required super.child});
+  const _Providers({
+    required this.auth,
+    required this.content,
+    required super.child,
+  });
 
   static _Providers of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<_Providers>()!;
@@ -757,7 +1097,12 @@ class CleanAppBar extends StatelessWidget implements PreferredSizeWidget {
   final String title;
   final bool showBack;
   final List<Widget>? actions;
-  const CleanAppBar({super.key, this.title = '', this.showBack = true, this.actions});
+  const CleanAppBar({
+    super.key,
+    this.title = '',
+    this.showBack = true,
+    this.actions,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -799,7 +1144,11 @@ class CleanAppBar extends StatelessWidget implements PreferredSizeWidget {
                       ),
                     ],
                   ),
-                  child: const Icon(Icons.arrow_back_ios_new, size: 15, color: kInk),
+                  child: const Icon(
+                    Icons.arrow_back_ios_new,
+                    size: 15,
+                    color: kInk,
+                  ),
                 ),
               ),
             )
@@ -832,11 +1181,19 @@ class OnboardingStepHeader extends StatelessWidget {
           children: [
             Text(
               'ขั้นตอนที่ $currentStep จาก $totalSteps',
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kGreenDark),
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: kGreenDark,
+              ),
             ),
             Text(
               stepTitle,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: kMuted),
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: kMuted,
+              ),
             ),
           ],
         ),
@@ -892,7 +1249,9 @@ class PrimaryButton extends StatelessWidget {
           backgroundColor: color,
           foregroundColor: textColor,
           elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
         ),
         onPressed: onTap,
         child: Row(
@@ -906,7 +1265,11 @@ class PrimaryButton extends StatelessWidget {
               child: Text(
                 text,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, letterSpacing: -0.2),
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.2,
+                ),
               ),
             ),
           ],
@@ -973,25 +1336,40 @@ class _CleanTextFieldState extends State<CleanTextField> {
         keyboardType: widget.keyboardType,
         inputFormatters: widget.inputFormatters,
         onChanged: widget.onChanged,
-        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: kInk),
+        style: const TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w500,
+          color: kInk,
+        ),
         decoration: InputDecoration(
           hintText: widget.hint,
-          hintStyle: const TextStyle(color: kMuted, fontSize: 14, fontWeight: FontWeight.normal),
-          prefixIcon: widget.icon != null ? Icon(widget.icon, color: kMuted, size: 20) : null,
+          hintStyle: const TextStyle(
+            color: kMuted,
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+          ),
+          prefixIcon: widget.icon != null
+              ? Icon(widget.icon, color: kMuted, size: 20)
+              : null,
           suffixIcon: widget.obscure
               ? IconButton(
                   icon: Icon(
-                    _obscured ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                    _obscured
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
                     color: kMuted,
                     size: 19,
                   ),
                   onPressed: () => setState(() => _obscured = !_obscured),
                 )
               : (widget.suffixIcon != null
-                  ? Icon(widget.suffixIcon, color: kMuted, size: 18)
-                  : null),
+                    ? Icon(widget.suffixIcon, color: kMuted, size: 18)
+                    : null),
           border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 18,
+            vertical: 15,
+          ),
         ),
       ),
     );
@@ -1013,7 +1391,11 @@ class FieldError extends StatelessWidget {
           Expanded(
             child: Text(
               message,
-              style: const TextStyle(color: kRed, fontSize: 12, fontWeight: FontWeight.w600),
+              style: const TextStyle(
+                color: kRed,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],
@@ -1026,12 +1408,16 @@ class FieldError extends StatelessWidget {
 class BaseNavLayout extends StatelessWidget {
   final Widget body;
   final int currentIndex;
-  const BaseNavLayout({super.key, required this.body, required this.currentIndex});
+  const BaseNavLayout({
+    super.key,
+    required this.body,
+    required this.currentIndex,
+  });
 
   void _navigate(BuildContext context, int index) {
     if (index == currentIndex) return;
     if (index == 0) Navigator.pushReplacementNamed(context, '/home');
-    if (index == 1) Navigator.pushReplacementNamed(context, '/stats');
+    if (index == 1) Navigator.pushReplacementNamed(context, '/insights');
     if (index == 2) Navigator.pushReplacementNamed(context, '/capture');
     if (index == 3) Navigator.pushReplacementNamed(context, '/history');
     if (index == 4) Navigator.pushReplacementNamed(context, '/profile');
@@ -1066,8 +1452,8 @@ class BaseNavLayout extends StatelessWidget {
                 onTap: () => _navigate(context, 0),
               ),
               _NavItem(
-                icon: Icons.bar_chart_rounded,
-                label: 'สถิติ',
+                icon: Icons.insights_rounded,
+                label: 'วิเคราะห์',
                 selected: currentIndex == 1,
                 onTap: () => _navigate(context, 1),
               ),
@@ -1075,7 +1461,10 @@ class BaseNavLayout extends StatelessWidget {
                 onTap: () => _navigate(context, 2),
                 borderRadius: BorderRadius.circular(22),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     color: kGreen,
                     borderRadius: BorderRadius.circular(22),
@@ -1090,7 +1479,11 @@ class BaseNavLayout extends StatelessWidget {
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 20),
+                      Icon(
+                        Icons.qr_code_scanner_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                       SizedBox(width: 5),
                       Text(
                         'สแกน',
@@ -1181,7 +1574,11 @@ Future<bool> showAdminLoginDialog(BuildContext context) async {
             Expanded(
               child: Text(
                 'เข้าสู่ระบบผู้ดูแลระบบ',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk),
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  color: kInk,
+                ),
               ),
             ),
           ],
@@ -1194,7 +1591,9 @@ Future<bool> showAdminLoginDialog(BuildContext context) async {
               controller: emailCtrl,
               decoration: InputDecoration(
                 labelText: 'อีเมลแอดมิน',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
               ),
             ),
             const SizedBox(height: 12),
@@ -1203,12 +1602,21 @@ Future<bool> showAdminLoginDialog(BuildContext context) async {
               obscureText: true,
               decoration: InputDecoration(
                 labelText: 'รหัสผ่าน (อย่างน้อย 4 ตัวอักษร)',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
               ),
             ),
             if (error.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text(error, style: const TextStyle(color: kRed, fontSize: 12, fontWeight: FontWeight.w600)),
+              Text(
+                error,
+                style: const TextStyle(
+                  color: kRed,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ],
         ),
@@ -1220,17 +1628,27 @@ Future<bool> showAdminLoginDialog(BuildContext context) async {
           ElevatedButton(
             style: ElevatedButton.styleFrom(
               backgroundColor: kGreen,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
-            onPressed: () {
+            onPressed: () async {
               final auth = _Providers.of(context).auth;
               if (auth.login(emailCtrl.text.trim(), passCtrl.text)) {
                 Navigator.pop(ctx, true);
               } else {
-                setState(() => error = 'กรุณากรอกอีเมลและรหัสผ่านอย่างน้อย 4 ตัวอักษร');
+                setState(
+                  () => error = 'กรุณากรอกอีเมลและรหัสผ่านอย่างน้อย 4 ตัวอักษร',
+                );
               }
             },
-            child: const Text('เข้าสู่ระบบ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            child: const Text(
+              'เข้าสู่ระบบ',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
         ],
       ),
@@ -1248,8 +1666,9 @@ class IntroScreen extends StatefulWidget {
 }
 
 class _IntroScreenState extends State<IntroScreen> {
-  final _emailCtrl = TextEditingController(text: 'Doradaymon@gmail.com');
-  final _passCtrl = TextEditingController(text: '12345678');
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _isSubmitting = false;
 
   @override
   void dispose() {
@@ -1258,14 +1677,44 @@ class _IntroScreenState extends State<IntroScreen> {
     super.dispose();
   }
 
-  void _login() {
+  Future<void> _login() async {
     if (_emailCtrl.text.trim().isEmpty || _passCtrl.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอกอีเมลและรหัสผ่าน'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text('กรุณากรอกอีเมลและรหัสผ่าน'),
+          backgroundColor: kRed,
+        ),
       );
       return;
     }
-    Navigator.pushReplacementNamed(context, '/home');
+    setState(() => _isSubmitting = true);
+    try {
+      final success = await context.content.login(
+        _emailCtrl.text,
+        _passCtrl.text,
+      );
+      if (!mounted) return;
+      if (success) {
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('อีเมลหรือรหัสผ่านไม่ถูกต้อง'),
+            backgroundColor: kRed,
+          ),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('เข้าสู่ระบบไม่สำเร็จ: $error'),
+          backgroundColor: kRed,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
   }
 
   @override
@@ -1283,14 +1732,26 @@ class _IntroScreenState extends State<IntroScreen> {
                 decoration: BoxDecoration(
                   color: kGreenBg,
                   borderRadius: BorderRadius.circular(30),
-                  border: Border.all(color: kGreen.withValues(alpha: 0.3), width: 1.5),
+                  border: Border.all(
+                    color: kGreen.withValues(alpha: 0.3),
+                    width: 1.5,
+                  ),
                 ),
-                child: const Icon(Icons.restaurant_rounded, size: 48, color: kGreen),
+                child: const Icon(
+                  Icons.restaurant_rounded,
+                  size: 48,
+                  color: kGreen,
+                ),
               ),
               const SizedBox(height: 20),
               const Text(
                 'วิเคราะห์โภชนาการ',
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.5),
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.w800,
+                  color: kInk,
+                  letterSpacing: -0.5,
+                ),
               ),
               const SizedBox(height: 8),
               const Text(
@@ -1312,15 +1773,28 @@ class _IntroScreenState extends State<IntroScreen> {
                 controller: _passCtrl,
               ),
               const SizedBox(height: 8),
-              PrimaryButton('เข้าสู่ระบบ', _login, icon: Icons.login_rounded),
+              PrimaryButton(
+                _isSubmitting ? 'กำลังเข้าสู่ระบบ...' : 'เข้าสู่ระบบ',
+                _isSubmitting ? () {} : _login,
+                icon: Icons.login_rounded,
+              ),
               const SizedBox(height: 16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Text('ยังไม่มีบัญชีใช่ไหม?', style: TextStyle(color: kMuted, fontSize: 13)),
+                  const Text(
+                    'ยังไม่มีบัญชีใช่ไหม?',
+                    style: TextStyle(color: kMuted, fontSize: 13),
+                  ),
                   TextButton(
                     onPressed: () => Navigator.pushNamed(context, '/register'),
-                    child: const Text('สมัครสมาชิกใหม่', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800)),
+                    child: const Text(
+                      'สมัครสมาชิกใหม่',
+                      style: TextStyle(
+                        color: kGreenDark,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1332,10 +1806,18 @@ class _IntroScreenState extends State<IntroScreen> {
                     Navigator.pushReplacementNamed(context, '/admin/home');
                   }
                 },
-                icon: const Icon(Icons.admin_panel_settings_outlined, size: 18, color: kGreenDark),
+                icon: const Icon(
+                  Icons.admin_panel_settings_outlined,
+                  size: 18,
+                  color: kGreenDark,
+                ),
                 label: const Text(
                   'เข้าสู่ระบบสำหรับผู้ดูแลระบบ (Admin)',
-                  style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w700, fontSize: 13),
+                  style: TextStyle(
+                    color: kGreenDark,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
                 ),
               ),
             ],
@@ -1381,7 +1863,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _nameError = name.isEmpty ? 'กรุณากรอกชื่อ - นามสกุล' : null;
       _emailError = email.isEmpty
           ? 'กรุณากรอกอีเมล'
-          : (!_emailRegex.hasMatch(email) ? 'รูปแบบอีเมลไม่ถูกต้อง เช่น name@example.com' : null);
+          : (!_emailRegex.hasMatch(email)
+                ? 'รูปแบบอีเมลไม่ถูกต้อง เช่น name@example.com'
+                : null);
       _passwordError = password.isEmpty
           ? 'กรุณากรอกรหัสผ่าน'
           : (password.length < 8 ? 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร' : null);
@@ -1399,13 +1883,30 @@ class _RegisterScreenState extends State<RegisterScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const OnboardingStepHeader(currentStep: 1, stepTitle: 'สร้างบัญชีผู้ใช้'),
+            const OnboardingStepHeader(
+              currentStep: 1,
+              stepTitle: 'สร้างบัญชีผู้ใช้',
+            ),
             const SizedBox(height: 24),
-            const Text('เริ่มต้นดูแลโภชนาการของคุณ', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk)),
+            const Text(
+              'เริ่มต้นดูแลโภชนาการของคุณ',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                color: kInk,
+              ),
+            ),
             const SizedBox(height: 6),
-            const Text('กรอกข้อมูลพื้นฐานเพื่อสร้างบัญชีผู้ใช้งาน', style: TextStyle(color: kMuted, fontSize: 13)),
+            const Text(
+              'กรอกข้อมูลพื้นฐานเพื่อสร้างบัญชีผู้ใช้งาน',
+              style: TextStyle(color: kMuted, fontSize: 13),
+            ),
             const SizedBox(height: 24),
-            CleanTextField(hint: 'ชื่อ - นามสกุล', icon: Icons.person_outline, controller: _nameCtrl),
+            CleanTextField(
+              hint: 'ชื่อ - นามสกุล',
+              icon: Icons.person_outline,
+              controller: _nameCtrl,
+            ),
             if (_nameError != null) FieldError(_nameError!),
             CleanTextField(
               hint: 'อีเมล',
@@ -1414,17 +1915,29 @@ class _RegisterScreenState extends State<RegisterScreen> {
               keyboardType: TextInputType.emailAddress,
             ),
             if (_emailError != null) FieldError(_emailError!),
-            CleanTextField(hint: 'รหัสผ่าน (อย่างน้อย 8 ตัวอักษร)', icon: Icons.lock_outline, controller: _passwordCtrl, obscure: true),
+            CleanTextField(
+              hint: 'รหัสผ่าน (อย่างน้อย 8 ตัวอักษร)',
+              icon: Icons.lock_outline,
+              controller: _passwordCtrl,
+              obscure: true,
+            ),
             if (_passwordError != null) FieldError(_passwordError!),
             const Spacer(),
             PrimaryButton('ถัดไป', () {
-              if (_validate()) {
-                context.content.startNewAccount(
-                  name: _nameCtrl.text.trim(),
-                  newEmail: _emailCtrl.text.trim(),
+              if (!_validate()) return;
+              final started = context.content.startNewAccount(
+                name: _nameCtrl.text.trim(),
+                newEmail: _emailCtrl.text.trim(),
+                password: _passwordCtrl.text,
+              );
+              if (!started) {
+                setState(
+                  () =>
+                      _emailError = 'อีเมลนี้มีบัญชีอยู่แล้ว กรุณาเข้าสู่ระบบ',
                 );
-                Navigator.pushNamed(context, '/dob');
+                return;
               }
+              Navigator.pushNamed(context, '/dob');
             }),
           ],
         ),
@@ -1442,8 +1955,18 @@ class DobScreen extends StatefulWidget {
 
 class _DobScreenState extends State<DobScreen> {
   static const _months = [
-    'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
-    'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม',
+    'มกราคม',
+    'กุมภาพันธ์',
+    'มีนาคม',
+    'เมษายน',
+    'พฤษภาคม',
+    'มิถุนายน',
+    'กรกฎาคม',
+    'สิงหาคม',
+    'กันยายน',
+    'ตุลาคม',
+    'พฤศจิกายน',
+    'ธันวาคม',
   ];
 
   late DateTime _selectedDate;
@@ -1476,19 +1999,26 @@ class _DobScreenState extends State<DobScreen> {
     final candidate = DateTime(y, m, d);
     final now = DateTime.now();
     setState(() {
-      _selectedDate = candidate.isAfter(now) ? DateTime(now.year, now.month, now.day) : candidate;
+      _selectedDate = candidate.isAfter(now)
+          ? DateTime(now.year, now.month, now.day)
+          : candidate;
     });
   }
 
-  void _next() {
+  Future<void> _next() async {
     final now = DateTime.now();
     if (_selectedDate.isAfter(DateTime(now.year, now.month, now.day))) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('วันเกิดต้องไม่เป็นวันที่ในอนาคต'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text('วันเกิดต้องไม่เป็นวันที่ในอนาคต'),
+          backgroundColor: kRed,
+        ),
       );
       return;
     }
-    context.content.updateAccountInfo(newBirthDate: _selectedDate);
+    final content = context.content;
+    await content.updateAccountInfo(newBirthDate: _selectedDate);
+    if (!mounted) return;
     Navigator.pushNamed(context, '/health');
   }
 
@@ -1506,11 +2036,19 @@ class _DobScreenState extends State<DobScreen> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
                 children: [
-                  const OnboardingStepHeader(currentStep: 2, stepTitle: 'ข้อมูลอายุ'),
+                  const OnboardingStepHeader(
+                    currentStep: 2,
+                    stepTitle: 'ข้อมูลอายุ',
+                  ),
                   const SizedBox(height: 20),
                   const Text(
                     'เลือกวันเดือนปีเกิดของคุณ',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.4),
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      color: kInk,
+                      letterSpacing: -0.4,
+                    ),
                   ),
                   const SizedBox(height: 6),
                   const Text(
@@ -1533,31 +2071,53 @@ class _DobScreenState extends State<DobScreen> {
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: const Icon(Icons.cake_rounded, color: kGreenDark, size: 22),
+                          child: const Icon(
+                            Icons.cake_rounded,
+                            color: kGreenDark,
+                            size: 22,
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('วันเกิดที่เลือก', style: TextStyle(fontSize: 11, color: kMuted, fontWeight: FontWeight.w600)),
+                              const Text(
+                                'วันเกิดที่เลือก',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: kMuted,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                               const SizedBox(height: 2),
                               Text(
                                 '${_selectedDate.day} ${_months[_selectedDate.month - 1]} ${_selectedDate.year} (พ.ศ. ${_selectedDate.year + 543})',
-                                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk),
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                  color: kInk,
+                                ),
                               ),
                             ],
                           ),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
                           decoration: BoxDecoration(
                             color: kGreen,
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Text(
                             'อายุ $_calculatedAge ปี',
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 12),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12,
+                            ),
                           ),
                         ),
                       ],
@@ -1569,7 +2129,10 @@ class _DobScreenState extends State<DobScreen> {
                       Expanded(
                         flex: 3,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 2,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(14),
@@ -1579,13 +2142,20 @@ class _DobScreenState extends State<DobScreen> {
                             child: DropdownButton<int>(
                               value: _selectedDate.month,
                               isExpanded: true,
-                              icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_down,
+                                color: kGreen,
+                              ),
                               items: List.generate(12, (idx) {
                                 return DropdownMenuItem(
                                   value: idx + 1,
                                   child: Text(
                                     _months[idx],
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: kInk),
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: kInk,
+                                    ),
                                   ),
                                 );
                               }),
@@ -1600,7 +2170,10 @@ class _DobScreenState extends State<DobScreen> {
                       Expanded(
                         flex: 2,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 2,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(14),
@@ -1610,13 +2183,20 @@ class _DobScreenState extends State<DobScreen> {
                             child: DropdownButton<int>(
                               value: _selectedDate.year,
                               isExpanded: true,
-                              icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
+                              icon: const Icon(
+                                Icons.keyboard_arrow_down,
+                                color: kGreen,
+                              ),
                               items: years.map((y) {
                                 return DropdownMenuItem(
                                   value: y,
                                   child: Text(
                                     'ค.ศ. $y',
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: kInk),
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: kInk,
+                                    ),
                                   ),
                                 );
                               }).toList(),
@@ -1652,7 +2232,9 @@ class _DobScreenState extends State<DobScreen> {
                         ),
                       ),
                       child: CalendarDatePicker(
-                        key: ValueKey('${_selectedDate.year}-${_selectedDate.month}'),
+                        key: ValueKey(
+                          '${_selectedDate.year}-${_selectedDate.month}',
+                        ),
                         initialDate: _selectedDate,
                         firstDate: DateTime(1920),
                         lastDate: DateTime.now(),
@@ -1706,8 +2288,12 @@ class _HealthScreenState extends State<HealthScreen> {
       _selectedGender = context.content.gender;
       _selectedTarget = context.content.goalType;
       _selectedActivity = context.content.activityLevel;
-      _weightCtrl.text = context.content.weightKg > 0 ? context.content.weightKg.toStringAsFixed(1) : '';
-      _heightCtrl.text = context.content.heightCm > 0 ? context.content.heightCm.toStringAsFixed(0) : '';
+      _weightCtrl.text = context.content.weightKg > 0
+          ? context.content.weightKg.toStringAsFixed(1)
+          : '';
+      _heightCtrl.text = context.content.heightCm > 0
+          ? context.content.heightCm.toStringAsFixed(0)
+          : '';
       _initialized = true;
     }
   }
@@ -1722,7 +2308,9 @@ class _HealthScreenState extends State<HealthScreen> {
   double? get _bmi {
     final w = double.tryParse(_weightCtrl.text.trim());
     final h = double.tryParse(_heightCtrl.text.trim());
-    if (w == null || h == null || w < 20 || w > 300 || h < 80 || h > 250) return null;
+    if (w == null || h == null || w < 20 || w > 300 || h < 80 || h > 250) {
+      return null;
+    }
     final hMeter = h / 100;
     return w / (hMeter * hMeter);
   }
@@ -1731,7 +2319,11 @@ class _HealthScreenState extends State<HealthScreen> {
     if (bmi < 18.5) {
       return {'label': 'น้ำหนักน้อย / ผอม', 'color': kBlue, 'bg': kGreenBg};
     } else if (bmi < 23.0) {
-      return {'label': 'สมส่วน (สุขภาพดี)', 'color': kGreenDark, 'bg': kGreenBg};
+      return {
+        'label': 'สมส่วน (สุขภาพดี)',
+        'color': kGreenDark,
+        'bg': kGreenBg,
+      };
     } else if (bmi < 25.0) {
       return {'label': 'น้ำหนักเกิน (ท้วม)', 'color': kOrange, 'bg': kGreenBg};
     } else {
@@ -1739,7 +2331,7 @@ class _HealthScreenState extends State<HealthScreen> {
     }
   }
 
-  void _onContinue() {
+  Future<void> _onContinue() async {
     final w = double.tryParse(_weightCtrl.text.trim());
     final h = double.tryParse(_heightCtrl.text.trim());
 
@@ -1754,18 +2346,34 @@ class _HealthScreenState extends State<HealthScreen> {
 
     if (_weightError != null || _heightError != null) return;
 
-    context.content.updateHealthProfile(
-      userGender: _selectedGender,
-      weight: w!,
-      height: h!,
-      targetType: _fromProfile ? _selectedTarget : null,
-      activity: _fromProfile ? _selectedActivity : null,
-    );
+    final content = context.content;
+    try {
+      await content.updateHealthProfile(
+        userGender: _selectedGender,
+        weight: w!,
+        height: h!,
+        targetType: _fromProfile ? _selectedTarget : null,
+        activity: _fromProfile ? _selectedActivity : null,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('บันทึกข้อมูลสุขภาพไม่สำเร็จ: $error'),
+            backgroundColor: kRed,
+          ),
+        );
+      }
+      return;
+    }
 
+    if (!mounted) return;
     if (_fromProfile) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('บันทึกข้อมูลสุขภาพและเป้าหมาย "$_selectedTarget" (${context.content.dailyGoal.toStringAsFixed(0)} kcal/วัน) เรียบร้อยแล้ว'),
+          content: Text(
+            'บันทึกข้อมูลสุขภาพและเป้าหมาย "$_selectedTarget" (${content.dailyGoal.toStringAsFixed(0)} kcal/วัน) เรียบร้อยแล้ว',
+          ),
           backgroundColor: kGreen,
         ),
       );
@@ -1795,11 +2403,7 @@ class _HealthScreenState extends State<HealthScreen> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                icon,
-                size: 20,
-                color: isSelected ? kGreenDark : kMuted,
-              ),
+              Icon(icon, size: 20, color: isSelected ? kGreenDark : kMuted),
               const SizedBox(width: 8),
               Text(
                 label,
@@ -1833,7 +2437,9 @@ class _HealthScreenState extends State<HealthScreen> {
     );
 
     return Scaffold(
-      appBar: CleanAppBar(title: _fromProfile ? 'ข้อมูลสุขภาพและเป้าหมาย' : 'ข้อมูลสุขภาพ'),
+      appBar: CleanAppBar(
+        title: _fromProfile ? 'ข้อมูลสุขภาพและเป้าหมาย' : 'ข้อมูลสุขภาพ',
+      ),
       body: GestureDetector(
         onTap: () => FocusScope.of(context).unfocus(),
         child: Padding(
@@ -1844,12 +2450,21 @@ class _HealthScreenState extends State<HealthScreen> {
                 child: ListView(
                   children: [
                     if (!_fromProfile) ...[
-                      const OnboardingStepHeader(currentStep: 3, stepTitle: 'สัดส่วนร่างกาย'),
+                      const OnboardingStepHeader(
+                        currentStep: 3,
+                        stepTitle: 'สัดส่วนร่างกาย',
+                      ),
                       const SizedBox(height: 20),
                     ],
                     Text(
-                      _fromProfile ? 'จัดการข้อมูลสุขภาพและเป้าหมาย' : 'ข้อมูลสุขภาพของคุณ',
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk),
+                      _fromProfile
+                          ? 'จัดการข้อมูลสุขภาพและเป้าหมาย'
+                          : 'ข้อมูลสุขภาพของคุณ',
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                        color: kInk,
+                      ),
                     ),
                     const SizedBox(height: 6),
                     const Text(
@@ -1866,17 +2481,32 @@ class _HealthScreenState extends State<HealthScreen> {
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.cake_outlined, size: 18, color: kGreenDark),
+                          const Icon(
+                            Icons.cake_outlined,
+                            size: 18,
+                            color: kGreenDark,
+                          ),
                           const SizedBox(width: 10),
                           Text(
                             'วันเกิด: $birthDateLabel',
-                            style: const TextStyle(fontWeight: FontWeight.w700, color: kInk, fontSize: 13),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: kInk,
+                              fontSize: 13,
+                            ),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 18),
-                    const Text('เพศ', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: kInk)),
+                    const Text(
+                      'เพศ',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: kInk,
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -1892,15 +2522,30 @@ class _HealthScreenState extends State<HealthScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('น้ำหนัก (กก.)', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: kInk)),
+                              const Text(
+                                'น้ำหนัก (กก.)',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 13,
+                                  color: kInk,
+                                ),
+                              ),
                               const SizedBox(height: 8),
                               CleanTextField(
                                 hint: 'เช่น 55.0',
                                 icon: Icons.monitor_weight_outlined,
                                 controller: _weightCtrl,
-                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-                                onChanged: (_) => setState(() => _weightError = null),
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                      decimal: true,
+                                    ),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                    RegExp(r'[0-9.]'),
+                                  ),
+                                ],
+                                onChanged: (_) =>
+                                    setState(() => _weightError = null),
                               ),
                             ],
                           ),
@@ -1910,15 +2555,30 @@ class _HealthScreenState extends State<HealthScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('ส่วนสูง (ซม.)', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: kInk)),
+                              const Text(
+                                'ส่วนสูง (ซม.)',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 13,
+                                  color: kInk,
+                                ),
+                              ),
                               const SizedBox(height: 8),
                               CleanTextField(
                                 hint: 'เช่น 165',
                                 icon: Icons.height,
                                 controller: _heightCtrl,
-                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-                                onChanged: (_) => setState(() => _heightError = null),
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                      decimal: true,
+                                    ),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                    RegExp(r'[0-9.]'),
+                                  ),
+                                ],
+                                onChanged: (_) =>
+                                    setState(() => _heightError = null),
                               ),
                             ],
                           ),
@@ -1934,11 +2594,16 @@ class _HealthScreenState extends State<HealthScreen> {
                           final Color statusColor = status['color'] as Color;
                           final Color statusBg = status['bg'] as Color;
                           return Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 14,
+                            ),
                             decoration: BoxDecoration(
                               color: statusBg,
                               borderRadius: BorderRadius.circular(18),
-                              border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                              border: Border.all(
+                                color: statusColor.withValues(alpha: 0.3),
+                              ),
                             ),
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1946,23 +2611,41 @@ class _HealthScreenState extends State<HealthScreen> {
                                 Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Text('ดัชนีมวลกาย (BMI)', style: TextStyle(fontSize: 11, color: kMuted, fontWeight: FontWeight.w600)),
+                                    const Text(
+                                      'ดัชนีมวลกาย (BMI)',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: kMuted,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
                                     const SizedBox(height: 2),
                                     Text(
                                       currentBmi.toStringAsFixed(1),
-                                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk),
+                                      style: const TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w800,
+                                        color: kInk,
+                                      ),
                                     ),
                                   ],
                                 ),
                                 Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: Colors.white,
                                     borderRadius: BorderRadius.circular(16),
                                   ),
                                   child: Text(
                                     status['label'] as String,
-                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: statusColor),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w800,
+                                      color: statusColor,
+                                    ),
                                   ),
                                 ),
                               ],
@@ -1974,21 +2657,30 @@ class _HealthScreenState extends State<HealthScreen> {
                     if (_fromProfile) ...[
                       const Padding(
                         padding: EdgeInsets.symmetric(vertical: 18),
-                        child: Divider(color: kBorder, height: 1, thickness: 1.5),
+                        child: Divider(
+                          color: kBorder,
+                          height: 1,
+                          thickness: 1.5,
+                        ),
                       ),
                       GoalSelectorSection(
                         selectedTarget: _selectedTarget,
                         selectedActivity: _selectedActivity,
                         recommendedKcal: liveRecommendedKcal,
-                        onTargetChanged: (val) => setState(() => _selectedTarget = val),
-                        onActivityChanged: (val) => setState(() => _selectedActivity = val),
+                        onTargetChanged: (val) =>
+                            setState(() => _selectedTarget = val),
+                        onActivityChanged: (val) =>
+                            setState(() => _selectedActivity = val),
                       ),
                     ],
                   ],
                 ),
               ),
               const SizedBox(height: 12),
-              PrimaryButton(_fromProfile ? 'บันทึกข้อมูลสุขภาพและเป้าหมาย' : 'ถัดไป', _onContinue),
+              PrimaryButton(
+                _fromProfile ? 'บันทึกข้อมูลสุขภาพและเป้าหมาย' : 'ถัดไป',
+                _onContinue,
+              ),
             ],
           ),
         ),
@@ -2027,7 +2719,8 @@ class GoalSelectorSection extends StatelessWidget {
     },
     {
       'title': 'เพิ่มน้ำหนัก',
-      'subtitle': 'เพิ่มพลังงาน +400 kcal/วัน เพื่อเสริมสร้างมวลกายอย่างเหมาะสม',
+      'subtitle':
+          'เพิ่มพลังงาน +400 kcal/วัน เพื่อเสริมสร้างมวลกายอย่างเหมาะสม',
       'icon': Icons.trending_up_rounded,
     },
   ];
@@ -2043,11 +2736,23 @@ class GoalSelectorSection extends StatelessWidget {
     final activeActivity = activityOptions.contains(selectedActivity)
         ? selectedActivity
         : activityOptions[1];
+    final activityDetails = <String, String>{
+      activityOptions[0]: 'ใช้ชีวิตประจำวันทั่วไป ไม่ค่อยได้ออกกำลังกาย',
+      activityOptions[1]: 'ออกกำลังกายหรือเคลื่อนไหวร่างกายสม่ำเสมอ',
+      activityOptions[2]: 'ออกกำลังกายหนักหรือใช้แรงมากเกือบทุกวัน',
+    };
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('เป้าหมายสุขภาพ', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk)),
+        const Text(
+          'เป้าหมายสุขภาพ',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 15,
+            color: kInk,
+          ),
+        ),
         const SizedBox(height: 10),
         ...targetCards.map((item) {
           final title = item['title'] as String;
@@ -2059,7 +2764,10 @@ class GoalSelectorSection extends StatelessWidget {
               borderRadius: BorderRadius.circular(16),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 160),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: isSelected ? kGreenBg : Colors.white,
                   borderRadius: BorderRadius.circular(16),
@@ -2103,7 +2811,11 @@ class GoalSelectorSection extends StatelessWidget {
                       ),
                     ),
                     if (isSelected)
-                      const Icon(Icons.check_circle_rounded, color: kGreen, size: 20),
+                      const Icon(
+                        Icons.check_circle_rounded,
+                        color: kGreen,
+                        size: 20,
+                      ),
                   ],
                 ),
               ),
@@ -2111,30 +2823,90 @@ class GoalSelectorSection extends StatelessWidget {
           );
         }),
         const SizedBox(height: 8),
-        const Text('ระดับกิจกรรมประจำวัน', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: kInk)),
+        const Text(
+          'ระดับกิจกรรมประจำวัน',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+            color: kInk,
+          ),
+        ),
         const SizedBox(height: 8),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+          padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(18),
             border: Border.all(color: kBorder, width: 1.5),
           ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: activeActivity,
-              isExpanded: true,
-              icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
-              items: activityOptions.map((item) {
-                return DropdownMenuItem<String>(
-                  value: item,
-                  child: Text(item, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: kInk)),
-                );
-              }).toList(),
-              onChanged: (val) {
-                if (val != null) onActivityChanged(val);
-              },
-            ),
+          child: Column(
+            children: activityOptions.map((item) {
+              final isSelected = activeActivity == item;
+              final title = item.split(' (').first;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: InkWell(
+                  onTap: () => onActivityChanged(item),
+                  borderRadius: BorderRadius.circular(14),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isSelected ? kGreenBg : Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: isSelected ? kGreen : kBorder),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          item == activityOptions[0]
+                              ? Icons.directions_walk_rounded
+                              : item == activityOptions[1]
+                              ? Icons.directions_run_rounded
+                              : Icons.fitness_center_rounded,
+                          size: 20,
+                          color: isSelected ? kGreenDark : kMuted,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                title,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w800,
+                                  color: isSelected ? kGreenDark : kInk,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                activityDetails[item]!,
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: kMuted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (isSelected)
+                          const Icon(
+                            Icons.check_circle_rounded,
+                            color: kGreen,
+                            size: 19,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
           ),
         ),
         const SizedBox(height: 14),
@@ -2154,7 +2926,11 @@ class GoalSelectorSection extends StatelessWidget {
                 children: [
                   Text(
                     'เป้าหมาย ($selectedTarget)',
-                    style: const TextStyle(fontSize: 12, color: kInk, fontWeight: FontWeight.w700),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: kInk,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                   const Text(
                     'พลังงานที่แนะนำต่อวัน',
@@ -2164,7 +2940,11 @@ class GoalSelectorSection extends StatelessWidget {
               ),
               Text(
                 '${recommendedKcal.toStringAsFixed(0)} kcal/วัน',
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kGreenDark),
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: kGreenDark,
+                ),
               ),
             ],
           ),
@@ -2212,25 +2992,49 @@ class _GoalScreenState extends State<GoalScreen> {
             Expanded(
               child: ListView(
                 children: [
-                  const OnboardingStepHeader(currentStep: 4, stepTitle: 'ตั้งเป้าหมายแคลอรี่'),
+                  const OnboardingStepHeader(
+                    currentStep: 4,
+                    stepTitle: 'ตั้งเป้าหมายแคลอรี่',
+                  ),
                   const SizedBox(height: 20),
                   GoalSelectorSection(
                     selectedTarget: _selectedTarget,
                     selectedActivity: _selectedActivity,
                     recommendedKcal: calculatedGoal,
-                    onTargetChanged: (val) => setState(() => _selectedTarget = val),
-                    onActivityChanged: (val) => setState(() => _selectedActivity = val),
+                    onTargetChanged: (val) =>
+                        setState(() => _selectedTarget = val),
+                    onActivityChanged: (val) =>
+                        setState(() => _selectedActivity = val),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 16),
-            PrimaryButton('บันทึกและเริ่มต้นใช้งาน', () {
-              context.content.updateHealthProfile(
-                targetType: _selectedTarget,
-                activity: _selectedActivity,
-              );
-              Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
+            PrimaryButton('บันทึกและเริ่มต้นใช้งาน', () async {
+              final content = context.content;
+              try {
+                await content.updateHealthProfile(
+                  targetType: _selectedTarget,
+                  activity: _selectedActivity,
+                );
+                await content.completeRegistration();
+                if (context.mounted) {
+                  Navigator.pushNamedAndRemoveUntil(
+                    context,
+                    '/home',
+                    (_) => false,
+                  );
+                }
+              } catch (error) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('สมัครสมาชิกไม่สำเร็จ: $error'),
+                      backgroundColor: kRed,
+                    ),
+                  );
+                }
+              }
             }),
           ],
         ),
@@ -2266,7 +3070,9 @@ class NextMealRecommendationCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: isQuotaFull ? kRed.withValues(alpha: 0.35) : kGreen.withValues(alpha: 0.35),
+          color: isQuotaFull
+              ? kRed.withValues(alpha: 0.35)
+              : kGreen.withValues(alpha: 0.35),
           width: 1.5,
         ),
         boxShadow: [
@@ -2289,7 +3095,9 @@ class NextMealRecommendationCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(
-                  isQuotaFull ? Icons.no_meals_rounded : Icons.auto_awesome_rounded,
+                  isQuotaFull
+                      ? Icons.no_meals_rounded
+                      : Icons.auto_awesome_rounded,
                   size: 19,
                   color: isQuotaFull ? kRed : kGreenDark,
                 ),
@@ -2303,7 +3111,11 @@ class NextMealRecommendationCard extends StatelessWidget {
                       isQuotaFull
                           ? 'โควตาพลังงานวันนี้เต็มแล้ว'
                           : 'แนะนำเมนูสำหรับ$nextMealLabel',
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk),
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: kInk,
+                      ),
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -2353,7 +3165,11 @@ class NextMealRecommendationCard extends StatelessWidget {
                       children: [
                         Text(
                           item['name'] as String,
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: kInk),
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: kInk,
+                          ),
                         ),
                         const SizedBox(height: 3),
                         Text(
@@ -2380,7 +3196,10 @@ class NextMealRecommendationCard extends StatelessWidget {
                       onTap: () => onQuickLog!(item),
                       borderRadius: BorderRadius.circular(12),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
                         decoration: BoxDecoration(
                           color: kGreen,
                           borderRadius: BorderRadius.circular(12),
@@ -2388,11 +3207,19 @@ class NextMealRecommendationCard extends StatelessWidget {
                         child: const Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.add_rounded, color: Colors.white, size: 15),
+                            Icon(
+                              Icons.add_rounded,
+                              color: Colors.white,
+                              size: 15,
+                            ),
                             SizedBox(width: 2),
                             Text(
                               'บันทึก',
-                              style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800),
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                              ),
                             ),
                           ],
                         ),
@@ -2419,7 +3246,9 @@ class DashboardScreen extends StatelessWidget {
       return 'วันนี้';
     }
     final yesterday = now.subtract(const Duration(days: 1));
-    if (d.year == yesterday.year && d.month == yesterday.month && d.day == yesterday.day) {
+    if (d.year == yesterday.year &&
+        d.month == yesterday.month &&
+        d.day == yesterday.day) {
       return 'เมื่อวาน';
     }
     return '${d.day}/${d.month}/${d.year}';
@@ -2433,22 +3262,19 @@ class DashboardScreen extends StatelessWidget {
     final percent = goalCal > 0 ? ((totalCal / goalCal) * 100).round() : 0;
     final progress = goalCal > 0 ? (totalCal / goalCal).clamp(0.0, 1.0) : 0.0;
     final isOver = totalCal > goalCal;
-    final isGoalReached = !isOver && goalCal > 0 && (goalCal - totalCal).abs() < 1;
+    final isGoalReached =
+        !isOver && goalCal > 0 && (goalCal - totalCal).abs() < 1;
     final remainingCal = (goalCal - totalCal).abs();
-    final remainingSigned = goalCal - totalCal;
     final meals = c.currentMeals;
 
-    final trendInsight = c.intakeTrendInsight;
-    final goalInsight = c.goalAndChoiceInsight;
     final bmi = c.currentBmi;
-    final nextMealName = c.suggestedNextMealType;
-    final recommendedList = c.getRecommendedNextMeals(limit: 3);
 
     return BaseNavLayout(
       currentIndex: 0,
       body: RefreshIndicator(
         color: kGreen,
-        onRefresh: () async => Future.delayed(const Duration(milliseconds: 500)),
+        onRefresh: () async =>
+            Future.delayed(const Duration(milliseconds: 500)),
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
           children: [
@@ -2460,20 +3286,39 @@ class DashboardScreen extends StatelessWidget {
                     children: [
                       Text(
                         'สวัสดี, ${c.fullName.split(' ').first}',
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.3),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          color: kInk,
+                          letterSpacing: -0.3,
+                        ),
                       ),
                       const SizedBox(height: 4),
                       Row(
                         children: [
                           InkWell(
-                            onTap: () => Navigator.pushNamed(context, '/health', arguments: {'fromProfile': true}),
+                            onTap: () => Navigator.pushNamed(
+                              context,
+                              '/health',
+                              arguments: {'fromProfile': true},
+                            ),
                             borderRadius: BorderRadius.circular(10),
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                              decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(10)),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: kGreenBg,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                               child: Text(
                                 'เป้าหมาย: ${c.goalType}',
-                                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kGreenDark),
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  color: kGreenDark,
+                                ),
                               ),
                             ),
                           ),
@@ -2481,7 +3326,11 @@ class DashboardScreen extends StatelessWidget {
                             const SizedBox(width: 6),
                             Text(
                               '• BMI ${bmi.toStringAsFixed(1)}',
-                              style: const TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: kMuted,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ],
                         ],
@@ -2503,7 +3352,10 @@ class DashboardScreen extends StatelessWidget {
                   },
                   borderRadius: BorderRadius.circular(16),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(16),
@@ -2511,10 +3363,25 @@ class DashboardScreen extends StatelessWidget {
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.calendar_today_rounded, size: 14, color: kGreenDark),
+                        const Icon(
+                          Icons.calendar_today_rounded,
+                          size: 14,
+                          color: kGreenDark,
+                        ),
                         const SizedBox(width: 6),
-                        Text(_formatDateLabel(c.selectedDate), style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: kInk)),
-                        const Icon(Icons.keyboard_arrow_down, size: 16, color: kMuted),
+                        Text(
+                          _formatDateLabel(c.selectedDate),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 12,
+                            color: kInk,
+                          ),
+                        ),
+                        const Icon(
+                          Icons.keyboard_arrow_down,
+                          size: 16,
+                          color: kMuted,
+                        ),
                       ],
                     ),
                   ),
@@ -2531,7 +3398,9 @@ class DashboardScreen extends StatelessWidget {
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(28),
                 border: Border.all(
-                  color: isOver ? kRed.withValues(alpha: 0.4) : kGreen.withValues(alpha: 0.35),
+                  color: isOver
+                      ? kRed.withValues(alpha: 0.4)
+                      : kGreen.withValues(alpha: 0.35),
                   width: 1.5,
                 ),
                 boxShadow: [
@@ -2544,6 +3413,28 @@ class DashboardScreen extends StatelessWidget {
               ),
               child: Column(
                 children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'พลังงานวันนี้',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w800,
+                            color: kInk,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          'คงเหลือ = เป้าหมาย - พลังงานที่รับประทาน',
+                          style: TextStyle(fontSize: 11, color: kMuted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
                   Row(
                     children: [
                       SizedBox(
@@ -2560,7 +3451,9 @@ class DashboardScreen extends StatelessWidget {
                                 strokeWidth: 12,
                                 strokeCap: StrokeCap.round,
                                 backgroundColor: isOver ? kRedBg : kGreenBg,
-                                color: isOver ? kRed : (isGoalReached ? kGreenDark : kGreen),
+                                color: isOver
+                                    ? kRed
+                                    : (isGoalReached ? kGreenDark : kGreen),
                               ),
                             ),
                             Container(
@@ -2574,15 +3467,27 @@ class DashboardScreen extends StatelessWidget {
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
                                   Text(
-                                    '$percent%',
-                                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk),
-                                  ),
-                                  Text(
-                                    isOver ? 'เกินเป้า' : 'ของวันนี้',
+                                    isOver ? 'เกินเป้า' : 'คงเหลือ',
                                     style: TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.w700,
                                       color: isOver ? kRed : kGreenDark,
+                                    ),
+                                  ),
+                                  Text(
+                                    remainingCal.toStringAsFixed(0),
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      color: kInk,
+                                    ),
+                                  ),
+                                  const Text(
+                                    'kcal',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: kMuted,
                                     ),
                                   ),
                                 ],
@@ -2596,13 +3501,6 @@ class DashboardScreen extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('พลังงานสะสมวันนี้', style: TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w600)),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${totalCal.toStringAsFixed(0)} kcal',
-                              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.5),
-                            ),
-                            const SizedBox(height: 8),
                             _MetricMiniRow(
                               label: 'เป้าหมายรายวัน',
                               value: '${goalCal.toStringAsFixed(0)} kcal',
@@ -2610,8 +3508,14 @@ class DashboardScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 4),
                             _MetricMiniRow(
-                              label: isOver ? 'เกินเป้าหมาย' : 'โควตาคงเหลือ',
-                              value: '${remainingCal.toStringAsFixed(0)} kcal',
+                              label: 'รับประทานแล้ว',
+                              value: '${totalCal.toStringAsFixed(0)} kcal',
+                              valueColor: kInk,
+                            ),
+                            const SizedBox(height: 4),
+                            _MetricMiniRow(
+                              label: 'เป้าหมายที่ใช้ไป',
+                              value: '$percent%',
                               valueColor: isOver ? kRed : kGreenDark,
                             ),
                           ],
@@ -2619,6 +3523,8 @@ class DashboardScreen extends StatelessWidget {
                       ),
                     ],
                   ),
+                  const SizedBox(height: 16),
+                  _DashboardBaselineCard(content: c),
                   const SizedBox(height: 16),
                   const Divider(color: kBorder, height: 1),
                   const SizedBox(height: 12),
@@ -2631,11 +3537,15 @@ class DashboardScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 12),
                   InkWell(
-                    onTap: () => Navigator.pushReplacementNamed(context, '/stats'),
+                    onTap: () =>
+                        Navigator.pushReplacementNamed(context, '/stats'),
                     borderRadius: BorderRadius.circular(14),
                     child: Container(
                       width: double.infinity,
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
                       decoration: BoxDecoration(
                         color: kGreenBg,
                         borderRadius: BorderRadius.circular(14),
@@ -2643,17 +3553,29 @@ class DashboardScreen extends StatelessWidget {
                       child: const Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.bar_chart_rounded, size: 18, color: kGreenDark),
+                          Icon(
+                            Icons.bar_chart_rounded,
+                            size: 18,
+                            color: kGreenDark,
+                          ),
                           SizedBox(width: 8),
                           Flexible(
                             child: Text(
                               'ดูหน้าเปรียบเทียบสัดส่วนพลังงาน & สถิติ',
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: kGreenDark),
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                color: kGreenDark,
+                              ),
                             ),
                           ),
                           SizedBox(width: 4),
-                          Icon(Icons.chevron_right_rounded, size: 18, color: kGreenDark),
+                          Icon(
+                            Icons.chevron_right_rounded,
+                            size: 18,
+                            color: kGreenDark,
+                          ),
                         ],
                       ),
                     ),
@@ -2661,109 +3583,40 @@ class DashboardScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
-
-            // ── ระบบแนะนำอาหารมื้อถัดไปจากโควตาคงเหลือ ──
-            NextMealRecommendationCard(
-              nextMealLabel: nextMealName,
-              remainingQuota: remainingSigned,
-              recommendedMeals: recommendedList,
-              allowQuickLog: true,
-              onQuickLog: (meal) {
-                final mName = meal['name'] as String;
-                final mKcal = (meal['energy'] as num).toDouble();
-                c.logMeal(
-                  name: mName,
-                  calories: mKcal,
-                  mealType: nextMealName,
-                );
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('บันทึก "$mName" (${mKcal.toStringAsFixed(0)} kcal) ใน$nextMealName เรียบร้อยแล้ว'),
-                    backgroundColor: kGreen,
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 20),
-
-            const Row(
-              children: [
-                Icon(Icons.insights_rounded, size: 19, color: kGreenDark),
-                SizedBox(width: 6),
-                Text(
-                  'วิเคราะห์การกินและเป้าหมายของคุณ',
-                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: kInk),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            Container(
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(22),
-                border: Border.all(color: kBorder, width: 1.5),
-                boxShadow: [
-                  BoxShadow(color: kInk.withValues(alpha: 0.03), blurRadius: 14, offset: const Offset(0, 4)),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _InsightTile(
-                    icon: (trendInsight['isMore'] as bool)
-                        ? Icons.north_east_rounded
-                        : Icons.south_east_rounded,
-                    iconBg: (trendInsight['isMore'] as bool) ? kRedBg : kGreenBg,
-                    iconColor: (trendInsight['isMore'] as bool) ? kRed : kGreenDark,
-                    title: trendInsight['title'] as String,
-                    description: trendInsight['detail'] as String,
-                    extraHighlight: trendInsight['mealHighlight'] as String,
-                  ),
-                  const Divider(color: kBorder, height: 22),
-                  _InsightTile(
-                    icon: goalInsight['status'] == 'danger'
-                        ? Icons.warning_amber_rounded
-                        : (goalInsight['status'] == 'warning'
-                            ? Icons.info_outline_rounded
-                            : Icons.verified_rounded),
-                    iconBg: goalInsight['status'] == 'danger' ? kRedBg : kGreenBg,
-                    iconColor: goalInsight['status'] == 'danger'
-                        ? kRed
-                        : (goalInsight['status'] == 'warning' ? kOrange : kGreenDark),
-                    title: 'ความเหมาะสมต่อเป้าหมาย (${c.goalType})',
-                    description: goalInsight['suitability'] as String,
-                  ),
-                  const Divider(color: kBorder, height: 22),
-                  _InsightTile(
-                    icon: Icons.restaurant_menu_rounded,
-                    iconBg: kGreenBg,
-                    iconColor: kGreenDark,
-                    title: 'คำแนะนำการเลือกทานมื้อถัดไป',
-                    description: goalInsight['choiceAdvice'] as String,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 22),
-
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('ประวัติการรับประทานอาหาร', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: kInk)),
+                const Text(
+                  'ประวัติการรับประทานอาหาร',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                    color: kInk,
+                  ),
+                ),
                 TextButton.icon(
-                  onPressed: () => Navigator.pushReplacementNamed(context, '/history'),
+                  onPressed: () =>
+                      Navigator.pushReplacementNamed(context, '/history'),
                   style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  icon: const Icon(Icons.history_rounded, size: 16, color: kGreenDark),
+                  icon: const Icon(
+                    Icons.history_rounded,
+                    size: 16,
+                    color: kGreenDark,
+                  ),
                   label: const Text(
                     'ดูประวัติย้อนหลังทั้งหมด',
-                    style: TextStyle(fontSize: 12, color: kGreenDark, fontWeight: FontWeight.w800),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: kGreenDark,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
               ],
@@ -2786,7 +3639,9 @@ class DashboardScreen extends StatelessWidget {
             else
               ...meals.map((meal) {
                 final mCal = (meal['calories'] as num).toDouble();
-                final sharePct = goalCal > 0 ? ((mCal / goalCal) * 100).round() : 0;
+                final sharePct = goalCal > 0
+                    ? ((mCal / goalCal) * 100).round()
+                    : 0;
                 final isHeavyMeal = mCal >= 550;
                 final mealType = (meal['mealType'] as String?) ?? 'มื้ออาหาร';
 
@@ -2797,10 +3652,29 @@ class DashboardScreen extends StatelessWidget {
                     margin: const EdgeInsets.only(bottom: 12),
                     padding: const EdgeInsets.only(right: 20),
                     alignment: Alignment.centerRight,
-                    decoration: BoxDecoration(color: kRedBg, borderRadius: BorderRadius.circular(20)),
-                    child: const Icon(Icons.delete_outline_rounded, color: kRed),
+                    decoration: BoxDecoration(
+                      color: kRedBg,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Icon(
+                      Icons.delete_outline_rounded,
+                      color: kRed,
+                    ),
                   ),
-                  onDismissed: (_) => c.deleteMeal(meal['id'] as String),
+                  onDismissed: (_) async {
+                    try {
+                      await c.deleteMeal(meal['id'] as String);
+                    } catch (error) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('ลบมื้ออาหารไม่สำเร็จ: $error'),
+                            backgroundColor: kRed,
+                          ),
+                        );
+                      }
+                    }
+                  },
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 12),
                     padding: const EdgeInsets.all(14),
@@ -2809,7 +3683,11 @@ class DashboardScreen extends StatelessWidget {
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: kBorder, width: 1.5),
                       boxShadow: [
-                        BoxShadow(color: kInk.withValues(alpha: 0.02), blurRadius: 8, offset: const Offset(0, 2)),
+                        BoxShadow(
+                          color: kInk.withValues(alpha: 0.02),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
                       ],
                     ),
                     child: Row(
@@ -2833,18 +3711,29 @@ class DashboardScreen extends StatelessWidget {
                             children: [
                               Text(
                                 meal['name'] as String,
-                                style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: kInk),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                  color: kInk,
+                                ),
                               ),
                               const SizedBox(height: 4),
                               Text(
                                 '${mCal.toStringAsFixed(0)} kcal • $mealType (${meal['time']} น.)',
-                                style: const TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w500),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: kMuted,
+                                  fontWeight: FontWeight.w500,
+                                ),
                               ),
                             ],
                           ),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
                           decoration: BoxDecoration(
                             color: isHeavyMeal ? kRedBg : kGreenBg,
                             borderRadius: BorderRadius.circular(12),
@@ -2907,15 +3796,26 @@ class MealCalorieColorBar extends StatelessWidget {
               const Expanded(
                 child: Text(
                   'แถบสีสัดส่วนพลังงานที่รับประทานไป',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: kInk),
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
                 ),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(
+                  color: kGreenBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
                 child: const Text(
                   'แยกตามมื้ออาหาร',
-                  style: TextStyle(fontSize: 11, color: kGreenDark, fontWeight: FontWeight.w700),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: kGreenDark,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ],
@@ -2961,7 +3861,8 @@ class MealCalorieColorBar extends StatelessWidget {
           children: [
             _ColorLegendDot(
               color: kBlue,
-              label: 'มื้อเช้า ${breakfastCal.toStringAsFixed(0)} kcal ($bPct%)',
+              label:
+                  'มื้อเช้า ${breakfastCal.toStringAsFixed(0)} kcal ($bPct%)',
             ),
             _ColorLegendDot(
               color: kGreen,
@@ -3001,7 +3902,11 @@ class _ColorLegendDot extends StatelessWidget {
         const SizedBox(width: 5),
         Text(
           label,
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: kInk),
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: kInk,
+          ),
         ),
       ],
     );
@@ -3009,6 +3914,286 @@ class _ColorLegendDot extends StatelessWidget {
 }
 
 // ───────────────────────── 5.5 Calorie Comparison & Statistics Screen ─────────────────────────
+class InsightsScreen extends StatelessWidget {
+  const InsightsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.content;
+    final remaining = c.dailyGoal - c.totalDailyCalories;
+    final trend = c.intakeTrendInsight;
+    final goal = c.goalAndChoiceInsight;
+
+    return BaseNavLayout(
+      currentIndex: 1,
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+        children: [
+          const Text(
+            'คำแนะนำและการวิเคราะห์',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              color: kInk,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'ติดตามแนวโน้มการกินและเลือกมื้อถัดไปให้เหมาะกับเป้าหมาย',
+            style: TextStyle(fontSize: 12, color: kMuted),
+          ),
+          const SizedBox(height: 20),
+          NextMealRecommendationCard(
+            nextMealLabel: c.suggestedNextMealType,
+            remainingQuota: remaining,
+            recommendedMeals: c.getRecommendedNextMeals(
+              customRemainingQuota: remaining,
+            ),
+            allowQuickLog: true,
+            onQuickLog: (meal) async {
+              final mealName = meal['name'] as String;
+              final calories = (meal['energy'] as num).toDouble();
+              try {
+                await c.logMeal(
+                  name: mealName,
+                  calories: calories,
+                  mealType: c.suggestedNextMealType,
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'บันทึก "$mealName" (${calories.toStringAsFixed(0)} kcal) เรียบร้อยแล้ว',
+                      ),
+                      backgroundColor: kGreen,
+                    ),
+                  );
+                }
+              } catch (error) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('บันทึกมื้ออาหารไม่สำเร็จ: $error'),
+                      backgroundColor: kRed,
+                    ),
+                  );
+                }
+              }
+            },
+          ),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: kBorder, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: kInk.withValues(alpha: 0.03),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'วิเคราะห์การกินและเป้าหมายของคุณ',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                    color: kInk,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _InsightTile(
+                  icon: (trend['isMore'] as bool)
+                      ? Icons.north_east_rounded
+                      : Icons.south_east_rounded,
+                  iconBg: (trend['isMore'] as bool) ? kRedBg : kGreenBg,
+                  iconColor: (trend['isMore'] as bool) ? kRed : kGreenDark,
+                  title: trend['title'] as String,
+                  description: trend['detail'] as String,
+                  extraHighlight: trend['mealHighlight'] as String,
+                ),
+                const Divider(color: kBorder, height: 22),
+                _InsightTile(
+                  icon: goal['status'] == 'danger'
+                      ? Icons.warning_amber_rounded
+                      : (goal['status'] == 'warning'
+                            ? Icons.info_outline_rounded
+                            : Icons.verified_rounded),
+                  iconBg: goal['status'] == 'danger' ? kRedBg : kGreenBg,
+                  iconColor: goal['status'] == 'danger'
+                      ? kRed
+                      : (goal['status'] == 'warning' ? kOrange : kGreenDark),
+                  title: 'ความเหมาะสมต่อเป้าหมาย (${c.goalType})',
+                  description: goal['suitability'] as String,
+                ),
+                const Divider(color: kBorder, height: 22),
+                _InsightTile(
+                  icon: Icons.restaurant_menu_rounded,
+                  iconBg: kGreenBg,
+                  iconColor: kGreenDark,
+                  title: 'คำแนะนำการเลือกทานมื้อถัดไป',
+                  description: goal['choiceAdvice'] as String,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pushReplacementNamed(context, '/stats'),
+            icon: const Icon(Icons.bar_chart_rounded),
+            label: const Text('ดูสถิติพลังงาน'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kGreenDark,
+              side: const BorderSide(color: kBorder),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashboardBaselineCard extends StatelessWidget {
+  final AppContent content;
+
+  const _DashboardBaselineCard({required this.content});
+
+  String _bmiCategory(double? bmi) {
+    if (bmi == null) return 'ยังไม่มีข้อมูล';
+    if (bmi < 18.5) return 'น้ำหนักน้อย';
+    if (bmi < 23) return 'สมส่วน';
+    if (bmi < 25) return 'น้ำหนักเกิน';
+    return 'อ้วน';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bmi = content.currentBmi;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(color: kBorder, height: 1),
+        const SizedBox(height: 12),
+        const Row(
+          children: [
+            Expanded(
+              child: Text(
+                'ค่าพื้นฐานเมื่อเริ่มตั้งเป้าหมาย',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: kInk,
+                ),
+              ),
+            ),
+            Icon(Icons.keyboard_arrow_up_rounded, color: kMuted),
+          ],
+        ),
+        const SizedBox(height: 10),
+        _DashboardBaselineMetric(
+          title: 'ดัชนีมวลกาย (BMI)',
+          value: bmi == null ? '--' : 'BMI ${bmi.toStringAsFixed(1)}',
+          detail: _bmiCategory(bmi),
+          icon: Icons.monitor_weight_outlined,
+        ),
+        _DashboardBaselineMetric(
+          title: 'พลังงานพื้นฐาน (BMR)',
+          value: '${content.basalMetabolicRate.toStringAsFixed(0)} kcal',
+          icon: Icons.local_fire_department_outlined,
+        ),
+        _DashboardBaselineMetric(
+          title: 'พลังงานที่ใช้ต่อวัน (TDEE)',
+          value: '${content.maintenanceTdee.toStringAsFixed(0)} kcal',
+          icon: Icons.bolt_rounded,
+        ),
+      ],
+    );
+  }
+}
+
+class _DashboardBaselineMetric extends StatelessWidget {
+  final String title;
+  final String value;
+  final String? detail;
+  final IconData icon;
+
+  const _DashboardBaselineMetric({
+    required this.title,
+    required this.value,
+    required this.icon,
+    this.detail,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: kMuted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: kInk,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Text(
+                      value,
+                      style: const TextStyle(fontSize: 12, color: kMuted),
+                    ),
+                    if (detail != null) ...[
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: kGreenBg,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            detail!,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              color: kGreenDark,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded, color: kMuted, size: 20),
+        ],
+      ),
+    );
+  }
+}
+
 class StatsScreen extends StatelessWidget {
   const StatsScreen({super.key});
 
@@ -3055,7 +4240,7 @@ class StatsScreen extends StatelessWidget {
     if (maxChartCal <= 0) maxChartCal = 2000;
 
     return BaseNavLayout(
-      currentIndex: 1,
+      currentIndex: -1,
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
         children: [
@@ -3068,7 +4253,12 @@ class StatsScreen extends StatelessWidget {
                   children: [
                     Text(
                       'เปรียบเทียบและสถิติพลังงาน',
-                      style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.3),
+                      style: TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w800,
+                        color: kInk,
+                        letterSpacing: -0.3,
+                      ),
                     ),
                     SizedBox(height: 2),
                     Text(
@@ -3093,18 +4283,29 @@ class StatsScreen extends StatelessWidget {
                 },
                 borderRadius: BorderRadius.circular(14),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
                   decoration: BoxDecoration(
                     color: kGreenBg,
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.calendar_today_rounded, size: 13, color: kGreenDark),
+                      const Icon(
+                        Icons.calendar_today_rounded,
+                        size: 13,
+                        color: kGreenDark,
+                      ),
                       const SizedBox(width: 5),
                       Text(
                         '${c.selectedDate.day}/${c.selectedDate.month}/${c.selectedDate.year}',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: kGreenDark),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: kGreenDark,
+                        ),
                       ),
                     ],
                   ),
@@ -3121,7 +4322,11 @@ class StatsScreen extends StatelessWidget {
               borderRadius: BorderRadius.circular(24),
               border: Border.all(color: kBorder, width: 1.5),
               boxShadow: [
-                BoxShadow(color: kInk.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
+                BoxShadow(
+                  color: kInk.withValues(alpha: 0.04),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
               ],
             ),
             child: Column(
@@ -3137,7 +4342,11 @@ class StatsScreen extends StatelessWidget {
                 const Divider(color: kBorder, height: 26),
                 const Text(
                   'เปรียบเทียบปริมาณพลังงานกับเป้าหมายรายวัน (Progress Bar)',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: kInk),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
                 ),
                 const SizedBox(height: 14),
                 _CalorieProgressBarRow(
@@ -3148,7 +4357,9 @@ class StatsScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 14),
                 _CalorieProgressBarRow(
-                  label: isOver ? 'พลังงานที่เกินเป้าหมายวันนี้' : 'โควตาพลังงานคงเหลือวันนี้',
+                  label: isOver
+                      ? 'พลังงานที่เกินเป้าหมายวันนี้'
+                      : 'โควตาพลังงานคงเหลือวันนี้',
                   current: isOver ? overCal : remainingCal,
                   target: goalCal,
                   barColor: isOver ? kRed : kBlue,
@@ -3193,7 +4404,11 @@ class StatsScreen extends StatelessWidget {
               borderRadius: BorderRadius.circular(24),
               border: Border.all(color: kBorder, width: 1.5),
               boxShadow: [
-                BoxShadow(color: kInk.withValues(alpha: 0.04), blurRadius: 14, offset: const Offset(0, 4)),
+                BoxShadow(
+                  color: kInk.withValues(alpha: 0.04),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
               ],
             ),
             child: Column(
@@ -3205,15 +4420,29 @@ class StatsScreen extends StatelessWidget {
                     const Expanded(
                       child: Text(
                         'กราฟสถิติพลังงานย้อนหลัง 7 วัน',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk),
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                          color: kInk,
+                        ),
                       ),
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: kGreenBg,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                       child: Text(
                         'เป้า ${goalCal.toStringAsFixed(0)} kcal',
-                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kGreenDark),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          color: kGreenDark,
+                        ),
                       ),
                     ),
                   ],
@@ -3240,7 +4469,9 @@ class StatsScreen extends StatelessWidget {
 
                       final Color barColor = cal <= 0
                           ? Colors.grey.shade200
-                          : (isDayOver ? kRed : (isSelected ? kGreenDark : kGreen));
+                          : (isDayOver
+                                ? kRed
+                                : (isSelected ? kGreenDark : kGreen));
 
                       return Expanded(
                         child: GestureDetector(
@@ -3252,8 +4483,12 @@ class StatsScreen extends StatelessWidget {
                                 cal > 0 ? cal.toStringAsFixed(0) : '-',
                                 style: TextStyle(
                                   fontSize: 10,
-                                  fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
-                                  color: isDayOver ? kRed : (isSelected ? kGreenDark : kMuted),
+                                  fontWeight: isSelected
+                                      ? FontWeight.w800
+                                      : FontWeight.w600,
+                                  color: isDayOver
+                                      ? kRed
+                                      : (isSelected ? kGreenDark : kMuted),
                                 ),
                               ),
                               const SizedBox(height: 6),
@@ -3274,7 +4509,9 @@ class StatsScreen extends StatelessWidget {
                                 _shortDayThai(d),
                                 style: TextStyle(
                                   fontSize: 11,
-                                  fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                                  fontWeight: isSelected
+                                      ? FontWeight.w800
+                                      : FontWeight.w600,
                                   color: isSelected ? kInk : kMuted,
                                 ),
                               ),
@@ -3283,7 +4520,9 @@ class StatsScreen extends StatelessWidget {
                                 style: TextStyle(
                                   fontSize: 9,
                                   color: isSelected ? kGreenDark : kMuted,
-                                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.normal,
+                                  fontWeight: isSelected
+                                      ? FontWeight.w700
+                                      : FontWeight.normal,
                                 ),
                               ),
                             ],
@@ -3299,7 +4538,10 @@ class StatsScreen extends StatelessWidget {
                   spacing: 16,
                   runSpacing: 6,
                   children: [
-                    _ColorLegendDot(color: kGreen, label: 'อยู่ในเกณฑ์เป้าหมาย'),
+                    _ColorLegendDot(
+                      color: kGreen,
+                      label: 'อยู่ในเกณฑ์เป้าหมาย',
+                    ),
                     _ColorLegendDot(color: kRed, label: 'เกินเป้าหมายรายวัน'),
                   ],
                 ),
@@ -3348,13 +4590,21 @@ class _CalorieProgressBarRow extends StatelessWidget {
             Expanded(
               child: Text(
                 label,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kInk),
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: kInk,
+                ),
               ),
             ),
             const SizedBox(width: 8),
             Text(
               '${current.toStringAsFixed(0)} / ${target.toStringAsFixed(0)} kcal ($pct%)',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: barColor),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: barColor,
+              ),
             ),
           ],
         ),
@@ -3386,15 +4636,26 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
   String _selectedRange = 'ทั้งหมด';
 
   static const _thaiMonths = [
-    'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-    'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.',
+    'ม.ค.',
+    'ก.พ.',
+    'มี.ค.',
+    'เม.ย.',
+    'พ.ค.',
+    'มิ.ย.',
+    'ก.ค.',
+    'ส.ค.',
+    'ก.ย.',
+    'ต.ค.',
+    'พ.ย.',
+    'ธ.ค.',
   ];
 
   String _formatSectionDate(DateTime date, DateTime now) {
     final today = DateTime(now.year, now.month, now.day);
     final target = DateTime(date.year, date.month, date.day);
     final diff = today.difference(target).inDays;
-    final fullDate = '${date.day} ${_thaiMonths[date.month - 1]} ${date.year + 543}';
+    final fullDate =
+        '${date.day} ${_thaiMonths[date.month - 1]} ${date.year + 543}';
     if (diff == 0) return 'วันนี้ • $fullDate';
     if (diff == 1) return 'เมื่อวาน • $fullDate';
     return fullDate;
@@ -3417,23 +4678,35 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
       final dayDiff = todayOnly.difference(dateOnly).inDays;
 
       if (_selectedRange == 'วันนี้' && dayDiff != 0) continue;
-      if (_selectedRange == '7 วันล่าสุด' && (dayDiff < 0 || dayDiff > 6)) continue;
+      if (_selectedRange == '7 วันล่าสุด' && (dayDiff < 0 || dayDiff > 6)) {
+        continue;
+      }
 
       final rawList = List<DynamicMap>.from(c.mealsByDate[key] ?? []);
-      rawList.sort((a, b) => (a['time'] as String? ?? '').compareTo(b['time'] as String? ?? ''));
+      rawList.sort(
+        (a, b) =>
+            (a['time'] as String? ?? '').compareTo(b['time'] as String? ?? ''),
+      );
 
       final filteredList = _searchQuery.trim().isEmpty
           ? rawList
           : rawList
-              .where((m) => (m['name'] as String).toLowerCase().contains(_searchQuery.trim().toLowerCase()))
-              .toList();
+                .where(
+                  (m) => (m['name'] as String).toLowerCase().contains(
+                    _searchQuery.trim().toLowerCase(),
+                  ),
+                )
+                .toList();
 
       if (filteredList.isNotEmpty) {
         groupedSections.add(MapEntry(key, filteredList));
       }
     }
 
-    final totalEntriesCount = groupedSections.fold<int>(0, (sum, e) => sum + e.value.length);
+    final totalEntriesCount = groupedSections.fold<int>(
+      0,
+      (sum, e) => sum + e.value.length,
+    );
 
     return BaseNavLayout(
       currentIndex: 3,
@@ -3449,7 +4722,12 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                   children: [
                     Text(
                       'ประวัติย้อนหลังของเมนูที่บันทึก',
-                      style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: kInk, letterSpacing: -0.3),
+                      style: TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w800,
+                        color: kInk,
+                        letterSpacing: -0.3,
+                      ),
                     ),
                     SizedBox(height: 2),
                     Text(
@@ -3460,11 +4738,21 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(12)),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: kGreenBg,
+                  borderRadius: BorderRadius.circular(12),
+                ),
                 child: Text(
                   '$totalEntriesCount รายการ',
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kGreenDark),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: kGreenDark,
+                  ),
                 ),
               ),
             ],
@@ -3492,7 +4780,10 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                     fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
                     color: isSelected ? kGreenDark : kMuted,
                   ),
-                  side: BorderSide(color: isSelected ? kGreen : kBorder, width: 1.5),
+                  side: BorderSide(
+                    color: isSelected ? kGreen : kBorder,
+                    width: 1.5,
+                  ),
                   onSelected: (_) => setState(() => _selectedRange = label),
                 ),
               );
@@ -3509,11 +4800,19 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
               ),
               child: const Column(
                 children: [
-                  Icon(Icons.history_toggle_off_rounded, size: 46, color: kMuted),
+                  Icon(
+                    Icons.history_toggle_off_rounded,
+                    size: 46,
+                    color: kMuted,
+                  ),
                   SizedBox(height: 10),
                   Text(
                     'ไม่พบประวัติการรับประทานอาหารในช่วงที่เลือก',
-                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: kInk),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                      color: kInk,
+                    ),
                   ),
                   SizedBox(height: 6),
                   Text(
@@ -3542,7 +4841,11 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                   borderRadius: BorderRadius.circular(22),
                   border: Border.all(color: kBorder, width: 1.5),
                   boxShadow: [
-                    BoxShadow(color: kInk.withValues(alpha: 0.03), blurRadius: 12, offset: const Offset(0, 4)),
+                    BoxShadow(
+                      color: kInk.withValues(alpha: 0.03),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
                   ],
                 ),
                 child: Column(
@@ -3555,20 +4858,36 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                           children: [
                             Container(
                               padding: const EdgeInsets.all(7),
-                              decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(10)),
-                              child: const Icon(Icons.calendar_month_rounded, size: 16, color: kGreenDark),
+                              decoration: BoxDecoration(
+                                color: kGreenBg,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(
+                                Icons.calendar_month_rounded,
+                                size: 16,
+                                color: kGreenDark,
+                              ),
                             ),
                             const SizedBox(width: 8),
                             Text(
                               _formatSectionDate(sectionDate, now),
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: kInk),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: kInk,
+                              ),
                             ),
                           ],
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
-                            color: dayTotalCal > c.dailyGoal ? kRedBg : kGreenBg,
+                            color: dayTotalCal > c.dailyGoal
+                                ? kRedBg
+                                : kGreenBg,
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(
@@ -3576,7 +4895,9 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                             style: TextStyle(
                               fontSize: 11,
                               fontWeight: FontWeight.w800,
-                              color: dayTotalCal > c.dailyGoal ? kRed : kGreenDark,
+                              color: dayTotalCal > c.dailyGoal
+                                  ? kRed
+                                  : kGreenDark,
                             ),
                           ),
                         ),
@@ -3588,9 +4909,13 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                       final meal = dayMeals[idx];
                       final isLast = idx == dayMeals.length - 1;
                       final cal = (meal['calories'] as num).toDouble();
-                      final weightGrams = (meal['weightGrams'] as num?)?.toInt() ?? 300;
-                      final sharePct = c.dailyGoal > 0 ? ((cal / c.dailyGoal) * 100).round() : 0;
-                      final mealType = (meal['mealType'] as String?) ?? 'มื้ออาหาร';
+                      final weightGrams =
+                          (meal['weightGrams'] as num?)?.toInt() ?? 300;
+                      final sharePct = c.dailyGoal > 0
+                          ? ((cal / c.dailyGoal) * 100).round()
+                          : 0;
+                      final mealType =
+                          (meal['mealType'] as String?) ?? 'มื้ออาหาร';
                       final time = (meal['time'] as String?) ?? '--:--';
 
                       return Padding(
@@ -3600,7 +4925,10 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                           children: [
                             Container(
                               width: 66,
-                              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 6,
+                                horizontal: 6,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.grey[50],
                                 borderRadius: BorderRadius.circular(10),
@@ -3610,13 +4938,21 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                                 children: [
                                   Text(
                                     '$time น.',
-                                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kInk),
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w800,
+                                      color: kInk,
+                                    ),
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
                                     mealType,
                                     textAlign: TextAlign.center,
-                                    style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: kGreenDark),
+                                    style: const TextStyle(
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w700,
+                                      color: kGreenDark,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -3628,12 +4964,19 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                                 children: [
                                   Text(
                                     meal['name'] as String,
-                                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: kInk),
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w800,
+                                      color: kInk,
+                                    ),
                                   ),
                                   const SizedBox(height: 3),
                                   Text(
                                     'พลังงาน ${cal.toStringAsFixed(0)} kcal ($sharePct% ของวัน) • ปริมาณ ~$weightGrams กรัม',
-                                    style: const TextStyle(fontSize: 11, color: kMuted),
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: kMuted,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -3642,15 +4985,39 @@ class _MealHistoryScreenState extends State<MealHistoryScreen> {
                               tooltip: 'ลบรายการนี้',
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints(),
-                              icon: const Icon(Icons.delete_outline_rounded, size: 18, color: kMuted),
-                              onPressed: () {
-                                c.deleteMeal(meal['id'] as String, fromDateKey: dateKeyStr);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('ลบรายการอาหารออกจากประวัติแล้ว'),
-                                    backgroundColor: kGreen,
-                                  ),
-                                );
+                              icon: const Icon(
+                                Icons.delete_outline_rounded,
+                                size: 18,
+                                color: kMuted,
+                              ),
+                              onPressed: () async {
+                                try {
+                                  await c.deleteMeal(
+                                    meal['id'] as String,
+                                    fromDateKey: dateKeyStr,
+                                  );
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'ลบรายการอาหารออกจากประวัติแล้ว',
+                                        ),
+                                        backgroundColor: kGreen,
+                                      ),
+                                    );
+                                  }
+                                } catch (error) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          'ลบมื้ออาหารไม่สำเร็จ: $error',
+                                        ),
+                                        backgroundColor: kRed,
+                                      ),
+                                    );
+                                  }
+                                }
                               },
                             ),
                           ],
@@ -3671,7 +5038,11 @@ class _MetricMiniRow extends StatelessWidget {
   final String label;
   final String value;
   final Color valueColor;
-  const _MetricMiniRow({required this.label, required this.value, required this.valueColor});
+  const _MetricMiniRow({
+    required this.label,
+    required this.value,
+    required this.valueColor,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -3679,7 +5050,14 @@ class _MetricMiniRow extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text(label, style: const TextStyle(fontSize: 12, color: kMuted)),
-        Text(value, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: valueColor)),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+            color: valueColor,
+          ),
+        ),
       ],
     );
   }
@@ -3709,7 +5087,10 @@ class _InsightTile extends StatelessWidget {
       children: [
         Container(
           padding: const EdgeInsets.all(9),
-          decoration: BoxDecoration(color: iconBg, borderRadius: BorderRadius.circular(12)),
+          decoration: BoxDecoration(
+            color: iconBg,
+            borderRadius: BorderRadius.circular(12),
+          ),
           child: Icon(icon, size: 18, color: iconColor),
         ),
         const SizedBox(width: 12),
@@ -3717,20 +5098,42 @@ class _InsightTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: kInk)),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: kInk,
+                ),
+              ),
               const SizedBox(height: 3),
-              Text(description, style: const TextStyle(fontSize: 12, color: kMuted, height: 1.4)),
+              Text(
+                description,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: kMuted,
+                  height: 1.4,
+                ),
+              ),
               if (extraHighlight.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
                   decoration: BoxDecoration(
                     color: kGreenBg,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(
                     extraHighlight,
-                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: kGreenDark, height: 1.35),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: kGreenDark,
+                      height: 1.35,
+                    ),
                   ),
                 ),
               ],
@@ -3814,7 +5217,10 @@ Future<void> showPhotoExceptionSheet(
               child: Container(
                 width: 44,
                 height: 4,
-                decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(4)),
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(4),
+                ),
               ),
             ),
             const SizedBox(height: 18),
@@ -3822,8 +5228,15 @@ Future<void> showPhotoExceptionSheet(
               children: [
                 Container(
                   padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: kRedBg, borderRadius: BorderRadius.circular(16)),
-                  child: const Icon(Icons.broken_image_outlined, color: kRed, size: 28),
+                  decoration: BoxDecoration(
+                    color: kRedBg,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const Icon(
+                    Icons.broken_image_outlined,
+                    color: kRed,
+                    size: 28,
+                  ),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -3831,17 +5244,31 @@ Future<void> showPhotoExceptionSheet(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(color: kRedBg, borderRadius: BorderRadius.circular(6)),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: kRedBg,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
                         child: Text(
                           'Exception Flow • ${error.code}',
-                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: kRed),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: kRed,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         error.title,
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          color: kInk,
+                        ),
                       ),
                     ],
                   ),
@@ -3866,34 +5293,58 @@ Future<void> showPhotoExceptionSheet(
                 children: [
                   const Row(
                     children: [
-                      Icon(Icons.lightbulb_outline_rounded, size: 16, color: kGreenDark),
+                      Icon(
+                        Icons.lightbulb_outline_rounded,
+                        size: 16,
+                        color: kGreenDark,
+                      ),
                       SizedBox(width: 6),
-                      Text('คำแนะนำในการแก้ไข', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: kGreenDark)),
+                      Text(
+                        'คำแนะนำในการแก้ไข',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: kGreenDark,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
-                  ...error.tips.map((tip) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('• ', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.bold)),
-                            Expanded(child: Text(tip, style: const TextStyle(fontSize: 12, color: kInk, height: 1.35))),
-                          ],
-                        ),
-                      )),
+                  ...error.tips.map(
+                    (tip) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '• ',
+                            style: TextStyle(
+                              color: kGreenDark,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              tip,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: kInk,
+                                height: 1.35,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
             const SizedBox(height: 20),
-            PrimaryButton(
-              'ถ่ายภาพใหม่อีกครั้ง',
-              () {
-                Navigator.pop(ctx);
-                onRetryCamera();
-              },
-              icon: Icons.camera_alt_rounded,
-            ),
+            PrimaryButton('ถ่ายภาพใหม่อีกครั้ง', () {
+              Navigator.pop(ctx);
+              onRetryCamera();
+            }, icon: Icons.camera_alt_rounded),
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
@@ -3902,14 +5353,19 @@ Future<void> showPhotoExceptionSheet(
                 style: OutlinedButton.styleFrom(
                   foregroundColor: kInk,
                   side: const BorderSide(color: kBorder, width: 1.5),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                 ),
-                onPressed: () {
+                onPressed: () async {
                   Navigator.pop(ctx);
                   onPickGallery();
                 },
                 icon: const Icon(Icons.photo_library_outlined, size: 19),
-                label: const Text('เลือกภาพใหม่จากคลังภาพ', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                label: const Text(
+                  'เลือกภาพใหม่จากคลังภาพ',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
               ),
             ),
           ],
@@ -3936,7 +5392,11 @@ class _CaptureScreenState extends State<CaptureScreen> {
   void initState() {
     super.initState();
     if (cameras.isNotEmpty) {
-      _controller = CameraController(cameras.first, ResolutionPreset.medium, enableAudio: false);
+      _controller = CameraController(
+        cameras.first,
+        ResolutionPreset.medium,
+        enableAudio: false,
+      );
       _initFuture = _controller!.initialize();
     }
   }
@@ -3961,7 +5421,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('ไม่พบฮาร์ดแวร์กล้องบนอุปกรณ์นี้'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text('ไม่พบฮาร์ดแวร์กล้องบนอุปกรณ์นี้'),
+          backgroundColor: kRed,
+        ),
       );
       return;
     }
@@ -3973,24 +5436,36 @@ class _CaptureScreenState extends State<CaptureScreen> {
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('อุปกรณ์นี้ไม่รองรับโหมดแฟลช'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text('อุปกรณ์นี้ไม่รองรับโหมดแฟลช'),
+          backgroundColor: kRed,
+        ),
       );
     }
   }
 
   Future<void> _pickFromGallery() async {
     try {
-      final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+      );
       if (picked == null || !mounted) return;
       final imageBytes = await picked.readAsBytes();
       if (!mounted) return;
 
-      if (imageBytes.isEmpty || imageBytes.length < 100 || imageBytes.length > 10 * 1024 * 1024) {
+      if (imageBytes.isEmpty ||
+          imageBytes.length < 100 ||
+          imageBytes.length > 10 * 1024 * 1024) {
         _triggerException(PhotoExceptionInfo.invalidOrCorrupted);
         return;
       }
 
-      Navigator.pushNamed(context, '/analysis', arguments: {'bytes': imageBytes});
+      Navigator.pushNamed(
+        context,
+        '/analysis',
+        arguments: {'bytes': imageBytes},
+      );
     } catch (_) {
       _triggerException(PhotoExceptionInfo.invalidOrCorrupted);
     }
@@ -4012,7 +5487,11 @@ class _CaptureScreenState extends State<CaptureScreen> {
         _triggerException(PhotoExceptionInfo.blurryOrDark);
         return;
       }
-      Navigator.pushNamed(context, '/analysis', arguments: {'bytes': imageBytes});
+      Navigator.pushNamed(
+        context,
+        '/analysis',
+        arguments: {'bytes': imageBytes},
+      );
     } catch (_) {
       _triggerException(PhotoExceptionInfo.blurryOrDark);
     } finally {
@@ -4024,7 +5503,9 @@ class _CaptureScreenState extends State<CaptureScreen> {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (ctx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -4032,32 +5513,79 @@ class _CaptureScreenState extends State<CaptureScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('ทดสอบแจ้งเตือนข้อผิดพลาดภาพถ่าย (Exception Flow)', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk)),
+              const Text(
+                'ทดสอบแจ้งเตือนข้อผิดพลาดภาพถ่าย (Exception Flow)',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                  color: kInk,
+                ),
+              ),
               const SizedBox(height: 4),
-              const Text('เลือกรูปแบบข้อผิดพลาดเพื่อตรวจสอบการทำงานของระบบแจ้งเตือน', style: TextStyle(fontSize: 12, color: kMuted)),
+              const Text(
+                'เลือกรูปแบบข้อผิดพลาดเพื่อตรวจสอบการทำงานของระบบแจ้งเตือน',
+                style: TextStyle(fontSize: 12, color: kMuted),
+              ),
               const SizedBox(height: 12),
               ListTile(
-                leading: const CircleAvatar(backgroundColor: kRedBg, child: Icon(Icons.no_food_outlined, color: kRed, size: 20)),
-                title: const Text('1. ไม่พบอาหารในภาพถ่าย', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                subtitle: const Text('จำลองกรณีถ่ายติดวัตถุอื่นที่ไม่ใช่อาหาร', style: TextStyle(fontSize: 12)),
+                leading: const CircleAvatar(
+                  backgroundColor: kRedBg,
+                  child: Icon(Icons.no_food_outlined, color: kRed, size: 20),
+                ),
+                title: const Text(
+                  '1. ไม่พบอาหารในภาพถ่าย',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+                subtitle: const Text(
+                  'จำลองกรณีถ่ายติดวัตถุอื่นที่ไม่ใช่อาหาร',
+                  style: TextStyle(fontSize: 12),
+                ),
                 onTap: () {
                   Navigator.pop(ctx);
-                  Navigator.pushNamed(context, '/analysis', arguments: {'simulateError': PhotoExceptionInfo.noFoodDetected});
+                  Navigator.pushNamed(
+                    context,
+                    '/analysis',
+                    arguments: {
+                      'simulateError': PhotoExceptionInfo.noFoodDetected,
+                    },
+                  );
                 },
               ),
               ListTile(
-                leading: const CircleAvatar(backgroundColor: kRedBg, child: Icon(Icons.blur_on_rounded, color: kRed, size: 20)),
-                title: const Text('2. ภาพเบลอหรือแสงสว่างไม่พอ', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                subtitle: const Text('จำลองกรณีมือสั่นหรือถ่ายในที่มืดเกินไป', style: TextStyle(fontSize: 12)),
+                leading: const CircleAvatar(
+                  backgroundColor: kRedBg,
+                  child: Icon(Icons.blur_on_rounded, color: kRed, size: 20),
+                ),
+                title: const Text(
+                  '2. ภาพเบลอหรือแสงสว่างไม่พอ',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+                subtitle: const Text(
+                  'จำลองกรณีมือสั่นหรือถ่ายในที่มืดเกินไป',
+                  style: TextStyle(fontSize: 12),
+                ),
                 onTap: () {
                   Navigator.pop(ctx);
                   _triggerException(PhotoExceptionInfo.blurryOrDark);
                 },
               ),
               ListTile(
-                leading: const CircleAvatar(backgroundColor: kRedBg, child: Icon(Icons.broken_image_outlined, color: kRed, size: 20)),
-                title: const Text('3. ไฟล์ภาพเสียหาย / ขนาดเกินกำหนด', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                subtitle: const Text('จำลองกรณีเลือกไฟล์จากคลังภาพไม่ได้', style: TextStyle(fontSize: 12)),
+                leading: const CircleAvatar(
+                  backgroundColor: kRedBg,
+                  child: Icon(
+                    Icons.broken_image_outlined,
+                    color: kRed,
+                    size: 20,
+                  ),
+                ),
+                title: const Text(
+                  '3. ไฟล์ภาพเสียหาย / ขนาดเกินกำหนด',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+                subtitle: const Text(
+                  'จำลองกรณีเลือกไฟล์จากคลังภาพไม่ได้',
+                  style: TextStyle(fontSize: 12),
+                ),
                 onTap: () {
                   Navigator.pop(ctx);
                   _triggerException(PhotoExceptionInfo.invalidOrCorrupted);
@@ -4081,12 +5609,22 @@ class _CaptureScreenState extends State<CaptureScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('สแกนอาหารด้วย AI', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kInk)),
+                const Text(
+                  'สแกนอาหารด้วย AI',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
+                ),
                 InkWell(
                   onTap: _showSimulateErrorMenu,
                   borderRadius: BorderRadius.circular(12),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: kRedBg,
                       borderRadius: BorderRadius.circular(12),
@@ -4094,9 +5632,20 @@ class _CaptureScreenState extends State<CaptureScreen> {
                     ),
                     child: const Row(
                       children: [
-                        Icon(Icons.warning_amber_rounded, size: 14, color: kRed),
+                        Icon(
+                          Icons.warning_amber_rounded,
+                          size: 14,
+                          color: kRed,
+                        ),
                         SizedBox(width: 4),
-                        Text('ทดสอบแจ้งเตือนภาพ', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kRed)),
+                        Text(
+                          'ทดสอบแจ้งเตือนภาพ',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            color: kRed,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -4119,26 +5668,42 @@ class _CaptureScreenState extends State<CaptureScreen> {
                           ? const Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Icon(Icons.restaurant_rounded, size: 64, color: kGreen),
+                                Icon(
+                                  Icons.restaurant_rounded,
+                                  size: 64,
+                                  color: kGreen,
+                                ),
                                 SizedBox(height: 12),
                                 Text(
                                   'โหมดจำลองกล้อง (กดปุ่มถ่ายภาพเพื่อทดสอบวิเคราะห์)',
-                                  style: TextStyle(color: kMuted, fontSize: 13, fontWeight: FontWeight.w600),
+                                  style: TextStyle(
+                                    color: kMuted,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ],
                             )
                           : FutureBuilder<void>(
                               future: _initFuture,
                               builder: (context, snapshot) {
-                                if (snapshot.connectionState == ConnectionState.done) {
+                                if (snapshot.connectionState ==
+                                    ConnectionState.done) {
                                   if (snapshot.hasError) {
                                     return const Center(
-                                      child: Text('ไม่สามารถเริ่มต้นกล้องได้ กรุณาเลือกภาพจากคลังภาพ', style: TextStyle(color: kMuted)),
+                                      child: Text(
+                                        'ไม่สามารถเริ่มต้นกล้องได้ กรุณาเลือกภาพจากคลังภาพ',
+                                        style: TextStyle(color: kMuted),
+                                      ),
                                     );
                                   }
                                   return CameraPreview(_controller!);
                                 }
-                                return const Center(child: CircularProgressIndicator(color: kGreen));
+                                return const Center(
+                                  child: CircularProgressIndicator(
+                                    color: kGreen,
+                                  ),
+                                );
                               },
                             ),
                     ),
@@ -4148,7 +5713,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
                         height: 230,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(28),
-                          border: Border.all(color: kGreen.withValues(alpha: 0.85), width: 2.5),
+                          border: Border.all(
+                            color: kGreen.withValues(alpha: 0.85),
+                            width: 2.5,
+                          ),
                         ),
                       ),
                     ),
@@ -4157,7 +5725,10 @@ class _CaptureScreenState extends State<CaptureScreen> {
                       left: 24,
                       right: 24,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
                         decoration: BoxDecoration(
                           color: kInk.withValues(alpha: 0.78),
                           borderRadius: BorderRadius.circular(14),
@@ -4165,7 +5736,11 @@ class _CaptureScreenState extends State<CaptureScreen> {
                         child: const Text(
                           'จัดจานอาหารให้อยู่กึ่งกลางกรอบเพื่อประเมินแคลอรี่',
                           textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),
@@ -4190,11 +5765,22 @@ class _CaptureScreenState extends State<CaptureScreen> {
                           shape: BoxShape.circle,
                           border: Border.all(color: kBorder, width: 1.5),
                         ),
-                        child: const Icon(Icons.photo_library_outlined, color: kInk, size: 22),
+                        child: const Icon(
+                          Icons.photo_library_outlined,
+                          color: kInk,
+                          size: 22,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text('คลังภาพ', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: kMuted)),
+                    const Text(
+                      'คลังภาพ',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: kMuted,
+                      ),
+                    ),
                   ],
                 ),
                 InkWell(
@@ -4207,15 +5793,26 @@ class _CaptureScreenState extends State<CaptureScreen> {
                       color: kGreen,
                       shape: BoxShape.circle,
                       boxShadow: [
-                        BoxShadow(color: kGreen.withValues(alpha: 0.38), blurRadius: 16, offset: const Offset(0, 6)),
+                        BoxShadow(
+                          color: kGreen.withValues(alpha: 0.38),
+                          blurRadius: 16,
+                          offset: const Offset(0, 6),
+                        ),
                       ],
                     ),
                     child: _isCapturing
                         ? const Padding(
                             padding: EdgeInsets.all(24),
-                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2.5,
+                            ),
                           )
-                        : const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 34),
+                        : const Icon(
+                            Icons.camera_alt_rounded,
+                            color: Colors.white,
+                            size: 34,
+                          ),
                   ),
                 ),
                 Column(
@@ -4229,17 +5826,29 @@ class _CaptureScreenState extends State<CaptureScreen> {
                         decoration: BoxDecoration(
                           color: _flashOn ? kGreenBg : Colors.white,
                           shape: BoxShape.circle,
-                          border: Border.all(color: _flashOn ? kGreen : kBorder, width: 1.5),
+                          border: Border.all(
+                            color: _flashOn ? kGreen : kBorder,
+                            width: 1.5,
+                          ),
                         ),
                         child: Icon(
-                          _flashOn ? Icons.flash_on_rounded : Icons.flash_off_rounded,
+                          _flashOn
+                              ? Icons.flash_on_rounded
+                              : Icons.flash_off_rounded,
                           color: _flashOn ? kGreenDark : kInk,
                           size: 22,
                         ),
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text('แฟลช', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: kMuted)),
+                    const Text(
+                      'แฟลช',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: kMuted,
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -4262,7 +5871,6 @@ class AnalysisScreen extends StatefulWidget {
 
 class _AnalysisScreenState extends State<AnalysisScreen> {
   int _selectedMenuIndex = 0;
-  double _portionMultiplier = 1.0;
   TimeOfDay _selectedTime = TimeOfDay.now();
 
   bool _isAnalyzing = true;
@@ -4339,7 +5947,9 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
   void _showCustomFoodDialog() {
     final currentFood = _aiPredictions[_selectedMenuIndex];
     final nameCtrl = TextEditingController(text: currentFood['name'] as String);
-    final calCtrl = TextEditingController(text: (currentFood['calories'] as double).toStringAsFixed(0));
+    final calCtrl = TextEditingController(
+      text: (currentFood['calories'] as double).toStringAsFixed(0),
+    );
 
     showDialog(
       context: context,
@@ -4356,8 +5966,8 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               calError = calCtrl.text.trim().isEmpty
                   ? 'กรุณากรอกพลังงาน'
                   : (parsedCal == null
-                      ? 'พลังงานต้องเป็นตัวเลขเท่านั้น'
-                      : (parsedCal <= 0 ? 'พลังงานต้องมากกว่า 0' : null));
+                        ? 'พลังงานต้องเป็นตัวเลขเท่านั้น'
+                        : (parsedCal <= 0 ? 'พลังงานต้องมากกว่า 0' : null));
             });
             if (nameError != null || calError != null) return;
 
@@ -4374,8 +5984,13 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
 
           return AlertDialog(
             backgroundColor: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            title: const Text('แก้ไขชื่อ / พลังงานอาหาร', style: TextStyle(fontWeight: FontWeight.bold, color: kInk)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Text(
+              'แก้ไขชื่อ / พลังงานอาหาร',
+              style: TextStyle(fontWeight: FontWeight.bold, color: kInk),
+            ),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -4401,11 +6016,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               ],
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ยกเลิก', style: TextStyle(color: kMuted))),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('ยกเลิก', style: TextStyle(color: kMuted)),
+              ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: kGreen),
                 onPressed: trySave,
-                child: const Text('บันทึกการแก้ไข', style: TextStyle(color: Colors.white)),
+                child: const Text(
+                  'บันทึกการแก้ไข',
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
             ],
           );
@@ -4443,7 +6064,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                   child: Container(
                     width: 44,
                     height: 4,
-                    decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(4)),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 18),
@@ -4453,7 +6077,11 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     SizedBox(width: 10),
                     Text(
                       'ยืนยันการบันทึกข้อมูลอาหาร',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk),
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: kInk,
+                      ),
                     ),
                   ],
                 ),
@@ -4475,12 +6103,19 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('ชื่อเมนูอาหาร', style: TextStyle(fontSize: 12, color: kMuted)),
+                          const Text(
+                            'ชื่อเมนูอาหาร',
+                            style: TextStyle(fontSize: 12, color: kMuted),
+                          ),
                           Flexible(
                             child: Text(
                               foodName,
                               textAlign: TextAlign.end,
-                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                color: kInk,
+                              ),
                             ),
                           ),
                         ],
@@ -4489,10 +6124,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('พลังงานทั้งหมด', style: TextStyle(fontSize: 12, color: kMuted)),
+                          const Text(
+                            'พลังงานทั้งหมด',
+                            style: TextStyle(fontSize: 12, color: kMuted),
+                          ),
                           Text(
                             '${calories.toStringAsFixed(0)} kcal ($mealSharePct% ของวัน)',
-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kGreenDark),
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                              color: kGreenDark,
+                            ),
                           ),
                         ],
                       ),
@@ -4500,10 +6142,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('ปริมาณโดยประมาณ', style: TextStyle(fontSize: 12, color: kMuted)),
+                          const Text(
+                            'ปริมาณโดยประมาณ',
+                            style: TextStyle(fontSize: 12, color: kMuted),
+                          ),
                           Text(
                             '~$weightGrams กรัม',
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kInk),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: kInk,
+                            ),
                           ),
                         ],
                       ),
@@ -4511,10 +6160,17 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text('เวลาที่รับประทาน', style: TextStyle(fontSize: 12, color: kMuted)),
+                          const Text(
+                            'เวลาที่รับประทาน',
+                            style: TextStyle(fontSize: 12, color: kMuted),
+                          ),
                           Text(
                             formattedTime,
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kInk),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: kInk,
+                            ),
                           ),
                         ],
                       ),
@@ -4522,27 +6178,37 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
-                const Text('เลือกมื้ออาหาร', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: kInk)),
+                const Text(
+                  'เลือกมื้ออาหาร',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
+                ),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
-                  children: ['มื้อเช้า', 'มื้อกลางวัน', 'มื้อเย็น', 'มื้อว่าง'].map((mType) {
-                    final selected = selectedMealType == mType;
-                    return ChoiceChip(
-                      label: Text(mType),
-                      selected: selected,
-                      selectedColor: kGreen,
-                      backgroundColor: Colors.grey[100],
-                      labelStyle: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: selected ? Colors.white : kInk,
-                      ),
-                      side: BorderSide.none,
-                      onSelected: (_) => setSheetState(() => selectedMealType = mType),
-                    );
-                  }).toList(),
+                  children: ['มื้อเช้า', 'มื้อกลางวัน', 'มื้อเย็น', 'มื้อว่าง']
+                      .map((mType) {
+                        final selected = selectedMealType == mType;
+                        return ChoiceChip(
+                          label: Text(mType),
+                          selected: selected,
+                          selectedColor: kGreen,
+                          backgroundColor: Colors.grey[100],
+                          labelStyle: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: selected ? Colors.white : kInk,
+                          ),
+                          side: BorderSide.none,
+                          onSelected: (_) =>
+                              setSheetState(() => selectedMealType = mType),
+                        );
+                      })
+                      .toList(),
                 ),
                 const SizedBox(height: 20),
                 Row(
@@ -4554,36 +6220,52 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                           style: OutlinedButton.styleFrom(
                             foregroundColor: kMuted,
                             side: const BorderSide(color: kBorder, width: 1.5),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
                           ),
                           onPressed: () => Navigator.pop(sheetCtx),
-                          child: const Text('ยกเลิก', style: TextStyle(fontWeight: FontWeight.w700)),
+                          child: const Text(
+                            'ยกเลิก',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       flex: 2,
-                      child: PrimaryButton(
-                        'ยืนยันการบันทึก',
-                        () {
-                          Navigator.pop(sheetCtx);
-                          context.content.logMeal(
+                      child: PrimaryButton('ยืนยันการบันทึก', () async {
+                        Navigator.pop(sheetCtx);
+                        try {
+                          await context.content.logMeal(
                             name: foodName,
                             calories: calories,
                             weightGrams: weightGrams,
                             mealType: selectedMealType,
                             customTime: _selectedTime,
                           );
-                          _showSaveSuccessDialog(
-                            foodName: foodName,
-                            calories: calories,
-                            mealType: selectedMealType,
-                            timeLabel: formattedTime,
-                          );
-                        },
-                        icon: Icons.check_circle_rounded,
-                      ),
+                          if (mounted) {
+                            _showSaveSuccessDialog(
+                              foodName: foodName,
+                              calories: calories,
+                              mealType: selectedMealType,
+                              timeLabel: formattedTime,
+                            );
+                          }
+                        } catch (error) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'บันทึกมื้ออาหารไม่สำเร็จ: $error',
+                                ),
+                                backgroundColor: kRed,
+                              ),
+                            );
+                          }
+                        }
+                      }, icon: Icons.check_circle_rounded),
                     ),
                   ],
                 ),
@@ -4614,13 +6296,24 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
             Container(
               width: 72,
               height: 72,
-              decoration: const BoxDecoration(color: kGreenBg, shape: BoxShape.circle),
-              child: const Icon(Icons.check_circle_rounded, color: kGreen, size: 46),
+              decoration: const BoxDecoration(
+                color: kGreenBg,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.check_circle_rounded,
+                color: kGreen,
+                size: 46,
+              ),
             ),
             const SizedBox(height: 16),
             const Text(
               'บันทึกข้อมูลสำเร็จ!',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kInk),
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                color: kInk,
+              ),
             ),
             const SizedBox(height: 8),
             Text(
@@ -4629,23 +6322,27 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               style: const TextStyle(fontSize: 13, color: kMuted, height: 1.45),
             ),
             const SizedBox(height: 22),
-            PrimaryButton(
-              'กลับไปหน้าหลัก',
-              () {
-                Navigator.pop(dialogCtx);
-                Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
-              },
-              icon: Icons.home_rounded,
-            ),
+            PrimaryButton('กลับไปหน้าหลัก', () {
+              Navigator.pop(dialogCtx);
+              Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
+            }, icon: Icons.home_rounded),
             const SizedBox(height: 8),
             TextButton(
               onPressed: () {
                 Navigator.pop(dialogCtx);
-                Navigator.pushNamedAndRemoveUntil(context, '/history', (_) => false);
+                Navigator.pushNamedAndRemoveUntil(
+                  context,
+                  '/history',
+                  (_) => false,
+                );
               },
               child: const Text(
                 'ดูประวัติการบันทึกย้อนหลัง',
-                style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800, fontSize: 13),
+                style: TextStyle(
+                  color: kGreenDark,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 13,
+                ),
               ),
             ),
           ],
@@ -4665,13 +6362,20 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
             children: [
               Container(
                 padding: const EdgeInsets.all(20),
-                decoration: const BoxDecoration(color: kGreenBg, shape: BoxShape.circle),
+                decoration: const BoxDecoration(
+                  color: kGreenBg,
+                  shape: BoxShape.circle,
+                ),
                 child: const CircularProgressIndicator(color: kGreen),
               ),
               const SizedBox(height: 20),
               const Text(
                 'กำลังวิเคราะห์ภาพอาหารด้วย AI...',
-                style: TextStyle(color: kInk, fontWeight: FontWeight.w800, fontSize: 16),
+                style: TextStyle(
+                  color: kInk,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                ),
               ),
               const SizedBox(height: 6),
               const Text(
@@ -4700,35 +6404,63 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       decoration: BoxDecoration(
                         color: kRedBg,
                         borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: kRed.withValues(alpha: 0.4), width: 1.5),
+                        border: Border.all(
+                          color: kRed.withValues(alpha: 0.4),
+                          width: 1.5,
+                        ),
                       ),
                       child: Column(
                         children: [
                           Container(
                             padding: const EdgeInsets.all(14),
-                            decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                            child: const Icon(Icons.error_outline_rounded, color: kRed, size: 42),
+                            decoration: const BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.error_outline_rounded,
+                              color: kRed,
+                              size: 42,
+                            ),
                           ),
                           const SizedBox(height: 14),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                             child: Text(
                               err.code,
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kRed),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                color: kRed,
+                              ),
                             ),
                           ),
                           const SizedBox(height: 8),
                           Text(
                             err.title,
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kInk),
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w800,
+                              color: kInk,
+                            ),
                           ),
                           const SizedBox(height: 8),
                           Text(
                             err.description,
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 13, color: kMuted, height: 1.45),
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: kMuted,
+                              height: 1.45,
+                            ),
                           ),
                         ],
                       ),
@@ -4746,23 +6478,49 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                         children: [
                           const Row(
                             children: [
-                              Icon(Icons.tips_and_updates_outlined, color: kGreenDark, size: 18),
+                              Icon(
+                                Icons.tips_and_updates_outlined,
+                                color: kGreenDark,
+                                size: 18,
+                              ),
                               SizedBox(width: 8),
-                              Text('แนวทางการแก้ไขปัญหา', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: kInk)),
+                              Text(
+                                'แนวทางการแก้ไขปัญหา',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                  color: kInk,
+                                ),
+                              ),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          ...err.tips.map((t) => Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Icon(Icons.check_circle_outline, size: 16, color: kGreen),
-                                    const SizedBox(width: 8),
-                                    Expanded(child: Text(t, style: const TextStyle(fontSize: 13, color: kInk, height: 1.35))),
-                                  ],
-                                ),
-                              )),
+                          ...err.tips.map(
+                            (t) => Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(
+                                    Icons.check_circle_outline,
+                                    size: 16,
+                                    color: kGreen,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      t,
+                                      style: const TextStyle(
+                                        fontSize: 13,
+                                        color: kInk,
+                                        height: 1.35,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -4787,22 +6545,29 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
 
     final currentFood = _aiPredictions[_selectedMenuIndex];
     final currentFoodName = currentFood['name'] as String;
-    final double finalCalories = (currentFood['calories'] as double) * _portionMultiplier;
-    final int mealSharePct = dailyCalorieGoal > 0 ? ((finalCalories / dailyCalorieGoal) * 100).round() : 0;
+    final double finalCalories = currentFood['calories'] as double;
+    final int mealSharePct = dailyCalorieGoal > 0
+        ? ((finalCalories / dailyCalorieGoal) * 100).round()
+        : 0;
 
-    final int weight = ((currentFood['weightGrams'] as int) * _portionMultiplier).round();
+    final int weight = currentFood['weightGrams'] as int;
     final double depthCm = currentFood['depthCm'] as double;
 
     final double projectedTotal = currentDailyCalories + finalCalories;
     final double diffFromGoal = dailyCalorieGoal - projectedTotal;
     final bool isOverLimit = projectedTotal > dailyCalorieGoal;
-    final bool isGoalReached = !isOverLimit && dailyCalorieGoal > 0 && diffFromGoal.abs() < 1;
-    final double progressRatio = dailyCalorieGoal > 0 ? (projectedTotal / dailyCalorieGoal).clamp(0.0, 1.0) : 0.0;
+    final bool isGoalReached =
+        !isOverLimit && dailyCalorieGoal > 0 && diffFromGoal.abs() < 1;
+    final double progressRatio = dailyCalorieGoal > 0
+        ? (projectedTotal / dailyCalorieGoal).clamp(0.0, 1.0)
+        : 0.0;
 
     final String formattedTime =
         '${_selectedTime.hour.toString().padLeft(2, '0')}:${_selectedTime.minute.toString().padLeft(2, '0')} น.';
 
-    final bool isTooMuchForGoal = (c.goalType.contains('ลดน้ำหนัก') && finalCalories >= 550) || isOverLimit;
+    final bool isTooMuchForGoal =
+        (c.goalType.contains('ลดน้ำหนัก') && finalCalories >= 550) ||
+        isOverLimit;
 
     final currentGuessedMeal = _guessMealType(_selectedTime);
     final upcomingMealType = _nextMealAfter(currentGuessedMeal);
@@ -4829,13 +6594,29 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     border: Border.all(color: kBorder, width: 1.5),
                   ),
                   child: _imageBytes != null
-                      ? Image.memory(_imageBytes!, fit: BoxFit.cover, width: double.infinity, height: 190)
+                      ? Image.memory(
+                          _imageBytes!,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: 190,
+                        )
                       : Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.restaurant_menu_rounded, size: 52, color: kGreen),
+                            const Icon(
+                              Icons.restaurant_menu_rounded,
+                              size: 52,
+                              color: kGreen,
+                            ),
                             const SizedBox(height: 8),
-                            Text('ภาพถ่ายอาหารที่สแกน', style: TextStyle(color: Colors.grey[600], fontSize: 12, fontWeight: FontWeight.w600)),
+                            Text(
+                              'ภาพถ่ายอาหารที่สแกน',
+                              style: TextStyle(
+                                color: Colors.grey[600],
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ],
                         ),
                 ),
@@ -4844,7 +6625,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 top: 12,
                 right: 12,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.95),
                     borderRadius: BorderRadius.circular(20),
@@ -4856,7 +6640,11 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       const SizedBox(width: 6),
                       Text(
                         'ความแม่นยำ ${currentFood['confidence']}%',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: kGreenDark),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: kGreenDark,
+                        ),
                       ),
                     ],
                   ),
@@ -4866,7 +6654,10 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 bottom: 12,
                 left: 12,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: kInk.withValues(alpha: 0.82),
                     borderRadius: BorderRadius.circular(12),
@@ -4874,11 +6665,19 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.layers_outlined, size: 14, color: Colors.white),
+                      const Icon(
+                        Icons.layers_outlined,
+                        size: 14,
+                        color: Colors.white,
+                      ),
                       const SizedBox(width: 6),
                       Text(
                         'ความลึก ${depthCm.toStringAsFixed(1)} ซม. • ปริมาณ ~$weight กรัม',
-                        style: const TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w600),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ],
                   ),
@@ -4894,13 +6693,24 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               Expanded(
                 child: Text(
                   currentFoodName,
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk),
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
                 ),
               ),
               TextButton.icon(
                 onPressed: _showCustomFoodDialog,
                 icon: const Icon(Icons.edit_note, size: 18, color: kGreenDark),
-                label: const Text('แก้ไขเมนู', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800, fontSize: 13)),
+                label: const Text(
+                  'แก้ไขเมนู',
+                  style: TextStyle(
+                    color: kGreenDark,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 13,
+                  ),
+                ),
               ),
             ],
           ),
@@ -4921,11 +6731,14 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     backgroundColor: Colors.grey[50],
                     labelStyle: TextStyle(
                       fontSize: 12,
-                      fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
+                      fontWeight: isSelected
+                          ? FontWeight.w800
+                          : FontWeight.w500,
                       color: isSelected ? kGreenDark : kMuted,
                     ),
                     side: BorderSide(color: isSelected ? kGreen : kBorder),
-                    onSelected: (_) => setState(() => _selectedMenuIndex = index),
+                    onSelected: (_) =>
+                        setState(() => _selectedMenuIndex = index),
                   ),
                 );
               }),
@@ -4948,30 +6761,26 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('พลังงานมื้อนี้', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: kInk)),
-                        Text('คิดเป็น $mealSharePct% ของเป้าหมายทั้งวัน', style: const TextStyle(fontSize: 11, color: kMuted)),
+                        const Text(
+                          'พลังงานมื้อนี้',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                            color: kInk,
+                          ),
+                        ),
+                        Text(
+                          'คิดเป็น $mealSharePct% ของเป้าหมายทั้งวัน',
+                          style: const TextStyle(fontSize: 11, color: kMuted),
+                        ),
                       ],
                     ),
                     Text(
                       '${finalCalories.toStringAsFixed(0)} kcal',
-                      style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: kGreenDark),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    const Text('ปริมาณ:', style: TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w700)),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Row(
-                        children: [
-                          _portionBtn('น้อย (0.5x)', 0.5),
-                          const SizedBox(width: 6),
-                          _portionBtn('ปกติ (1x)', 1.0),
-                          const SizedBox(width: 6),
-                          _portionBtn('พิเศษ (1.5x)', 1.5),
-                        ],
+                      style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                        color: kGreenDark,
                       ),
                     ),
                   ],
@@ -4980,28 +6789,54 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text('เวลาที่รับประทาน:', style: TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w700)),
+                    const Text(
+                      'เวลาที่รับประทาน:',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: kMuted,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                     InkWell(
                       onTap: () async {
-                        final picked = await showTimePicker(context: context, initialTime: _selectedTime);
+                        final picked = await showTimePicker(
+                          context: context,
+                          initialTime: _selectedTime,
+                        );
                         if (picked != null) {
                           setState(() => _selectedTime = picked);
                         }
                       },
                       borderRadius: BorderRadius.circular(10),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: kGreen.withValues(alpha: 0.3)),
+                          border: Border.all(
+                            color: kGreen.withValues(alpha: 0.3),
+                          ),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.access_time, size: 14, color: kGreenDark),
+                            const Icon(
+                              Icons.access_time,
+                              size: 14,
+                              color: kGreenDark,
+                            ),
                             const SizedBox(width: 6),
-                            Text(formattedTime, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: kInk)),
+                            Text(
+                              formattedTime,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                                color: kInk,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -5019,7 +6854,9 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
               color: isTooMuchForGoal ? kRedBg : Colors.white,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: isTooMuchForGoal ? kRed.withValues(alpha: 0.45) : kBorder,
+                color: isTooMuchForGoal
+                    ? kRed.withValues(alpha: 0.45)
+                    : kBorder,
                 width: 1.5,
               ),
             ),
@@ -5029,7 +6866,9 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 Row(
                   children: [
                     Icon(
-                      isTooMuchForGoal ? Icons.warning_amber_rounded : Icons.recommend_rounded,
+                      isTooMuchForGoal
+                          ? Icons.warning_amber_rounded
+                          : Icons.recommend_rounded,
                       color: isTooMuchForGoal ? kRed : kGreenDark,
                       size: 20,
                     ),
@@ -5051,7 +6890,11 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                 const SizedBox(height: 6),
                 Text(
                   currentFood['advice'] as String,
-                  style: const TextStyle(fontSize: 12, color: kMuted, height: 1.4),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: kMuted,
+                    height: 1.4,
+                  ),
                 ),
               ],
             ),
@@ -5061,10 +6904,14 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
           Container(
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-              color: isOverLimit ? kRedBg : (isGoalReached ? kGreenBg : Colors.white),
+              color: isOverLimit
+                  ? kRedBg
+                  : (isGoalReached ? kGreenBg : Colors.white),
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: isOverLimit ? kRed.withValues(alpha: 0.5) : (isGoalReached ? kGreen : kBorder),
+                color: isOverLimit
+                    ? kRed.withValues(alpha: 0.5)
+                    : (isGoalReached ? kGreen : kBorder),
                 width: 1.5,
               ),
             ),
@@ -5077,9 +6924,11 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       isOverLimit
                           ? Icons.warning_amber_rounded
                           : isGoalReached
-                              ? Icons.check_circle
-                              : Icons.track_changes,
-                      color: isOverLimit ? kRed : (isGoalReached ? kGreenDark : kGreen),
+                          ? Icons.check_circle
+                          : Icons.track_changes,
+                      color: isOverLimit
+                          ? kRed
+                          : (isGoalReached ? kGreenDark : kGreen),
                       size: 20,
                     ),
                     const SizedBox(width: 8),
@@ -5088,12 +6937,14 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                         isOverLimit
                             ? 'แจ้งเตือน: พลังงานเกินเป้าหมายรายวัน!'
                             : isGoalReached
-                                ? 'ยินดีด้วย! พลังงานถึงเป้าหมายวันนี้พอดี'
-                                : 'ผลลัพธ์เทียบกับเป้าหมายวันนี้',
+                            ? 'ยินดีด้วย! พลังงานถึงเป้าหมายวันนี้พอดี'
+                            : 'ผลลัพธ์เทียบกับเป้าหมายวันนี้',
                         style: TextStyle(
                           fontWeight: FontWeight.w800,
                           fontSize: 14,
-                          color: isOverLimit ? kRed : (isGoalReached ? kGreenDark : kInk),
+                          color: isOverLimit
+                              ? kRed
+                              : (isGoalReached ? kGreenDark : kInk),
                         ),
                       ),
                     ),
@@ -5105,8 +6956,12 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                   child: LinearProgressIndicator(
                     value: progressRatio,
                     minHeight: 10,
-                    backgroundColor: isOverLimit ? Colors.red.withValues(alpha: 0.15) : kGreenBg,
-                    color: isOverLimit ? kRed : (isGoalReached ? kGreenDark : kGreen),
+                    backgroundColor: isOverLimit
+                        ? Colors.red.withValues(alpha: 0.15)
+                        : kGreenBg,
+                    color: isOverLimit
+                        ? kRed
+                        : (isGoalReached ? kGreenDark : kGreen),
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -5118,19 +6973,23 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
-                        color: isOverLimit ? kRed : (isGoalReached ? kGreenDark : kMuted),
+                        color: isOverLimit
+                            ? kRed
+                            : (isGoalReached ? kGreenDark : kMuted),
                       ),
                     ),
                     Text(
                       isOverLimit
                           ? 'เกิน ${diffFromGoal.abs().toStringAsFixed(0)} kcal'
                           : isGoalReached
-                              ? 'ถึงเป้าหมายพอดี!'
-                              : 'เหลืออีก ${diffFromGoal.toStringAsFixed(0)} kcal',
+                          ? 'ถึงเป้าหมายพอดี!'
+                          : 'เหลืออีก ${diffFromGoal.toStringAsFixed(0)} kcal',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w800,
-                        color: isOverLimit ? kRed : (isGoalReached ? kGreenDark : kGreenDark),
+                        color: isOverLimit
+                            ? kRed
+                            : (isGoalReached ? kGreenDark : kGreenDark),
                       ),
                     ),
                   ],
@@ -5163,33 +7022,6 @@ class _AnalysisScreenState extends State<AnalysisScreen> {
       ),
     );
   }
-
-  Widget _portionBtn(String label, double value) {
-    final isSelected = _portionMultiplier == value;
-    return Expanded(
-      child: InkWell(
-        onTap: () => setState(() => _portionMultiplier = value),
-        borderRadius: BorderRadius.circular(10),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: isSelected ? kGreen : Colors.white,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: isSelected ? kGreen : kGreen.withValues(alpha: 0.3)),
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w800,
-              color: isSelected ? Colors.white : kInk,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ───────────────────────── 8. Profile ─────────────────────────
@@ -5207,37 +7039,73 @@ class ProfileScreen extends StatelessWidget {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
           backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          title: const Text('แก้ไขข้อมูลบัญชี', style: TextStyle(fontWeight: FontWeight.w800, color: kInk)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          title: const Text(
+            'แก้ไขข้อมูลบัญชี',
+            style: TextStyle(fontWeight: FontWeight.w800, color: kInk),
+          ),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('ชื่อ - นามสกุล', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kMuted)),
+                const Text(
+                  'ชื่อ - นามสกุล',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: kMuted,
+                  ),
+                ),
                 const SizedBox(height: 6),
                 TextField(
                   controller: nameCtrl,
                   decoration: InputDecoration(
                     hintText: 'กรอกชื่อ - นามสกุล',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
-                const Text('อีเมล', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kMuted)),
+                const Text(
+                  'อีเมล',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: kMuted,
+                  ),
+                ),
                 const SizedBox(height: 6),
                 TextField(
                   controller: emailCtrl,
                   keyboardType: TextInputType.emailAddress,
                   decoration: InputDecoration(
                     hintText: 'กรอกอีเมล',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
-                const Text('วันเกิด (ปฏิทิน)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: kMuted)),
+                const Text(
+                  'วันเกิด (ปฏิทิน)',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: kMuted,
+                  ),
+                ),
                 const SizedBox(height: 6),
                 InkWell(
                   onTap: () async {
@@ -5254,7 +7122,10 @@ class ProfileScreen extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   child: Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
                     decoration: BoxDecoration(
                       border: Border.all(color: Colors.grey.shade400),
                       borderRadius: BorderRadius.circular(12),
@@ -5264,9 +7135,17 @@ class ProfileScreen extends StatelessWidget {
                       children: [
                         Text(
                           '${tempBirthDate.day}/${tempBirthDate.month}/${tempBirthDate.year}',
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: kInk),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: kInk,
+                          ),
                         ),
-                        const Icon(Icons.calendar_today, size: 16, color: kGreen),
+                        const Icon(
+                          Icons.calendar_today,
+                          size: 16,
+                          color: kGreen,
+                        ),
                       ],
                     ),
                   ),
@@ -5282,34 +7161,75 @@ class ProfileScreen extends StatelessWidget {
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: kGreen,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
-              onPressed: () {
+              onPressed: () async {
                 final newName = nameCtrl.text.trim();
                 final newEmail = emailCtrl.text.trim();
                 if (newName.isEmpty || newEmail.isEmpty) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('กรุณากรอกข้อมูลให้ครบถ้วน'), backgroundColor: kRed),
+                    const SnackBar(
+                      content: Text('กรุณากรอกข้อมูลให้ครบถ้วน'),
+                      backgroundColor: kRed,
+                    ),
                   );
                   return;
                 }
-                if (!RegExp(r'^[\w\.\+\-]+@[\w\-]+\.[\w\.\-]+$').hasMatch(newEmail)) {
+                if (!RegExp(r'^[\w\.\+\-]+@[\w\-]+\.[\w\.\-]+$')
+                    .hasMatch(newEmail)) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('รูปแบบอีเมลไม่ถูกต้อง เช่น name@example.com'), backgroundColor: kRed),
+                    const SnackBar(
+                      content: Text(
+                        'รูปแบบอีเมลไม่ถูกต้อง เช่น name@example.com',
+                      ),
+                      backgroundColor: kRed,
+                    ),
                   );
                   return;
                 }
-                c.updateAccountInfo(
-                  name: newName,
-                  newEmail: newEmail,
-                  newBirthDate: tempBirthDate,
-                );
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('บันทึกข้อมูลบัญชีเรียบร้อยแล้ว'), backgroundColor: kGreen),
-                );
+                try {
+                  final updated = await c.updateAccountInfo(
+                    name: newName,
+                    newEmail: newEmail,
+                    newBirthDate: tempBirthDate,
+                  );
+                  if (!context.mounted) return;
+                  if (!updated) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('อีเมลนี้มีบัญชีอยู่แล้ว'),
+                        backgroundColor: kRed,
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('บันทึกข้อมูลบัญชีเรียบร้อยแล้ว'),
+                      backgroundColor: kGreen,
+                    ),
+                  );
+                } catch (error) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('บันทึกข้อมูลบัญชีไม่สำเร็จ: $error'),
+                        backgroundColor: kRed,
+                      ),
+                    );
+                  }
+                }
               },
-              child: const Text('บันทึก', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              child: const Text(
+                'บันทึก',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
           ],
         ),
@@ -5320,8 +7240,6 @@ class ProfileScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.content;
-    final bDate = c.birthDate;
-    final bDateStr = bDate == null ? '--' : '${bDate.day}/${bDate.month}/${bDate.year}';
     final bmi = c.currentBmi;
 
     return BaseNavLayout(
@@ -5329,85 +7247,131 @@ class ProfileScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          const Center(child: Text('โปรไฟล์ส่วนตัว', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: kInk))),
+          const Center(
+            child: Text(
+              'บัญชี',
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 18,
+                color: kInk,
+              ),
+            ),
+          ),
           const SizedBox(height: 20),
-          Center(
-            child: Column(
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: kBorder, width: 1.5),
+            ),
+            child: Row(
               children: [
                 Container(
-                  width: 80,
-                  height: 80,
+                  width: 58,
+                  height: 58,
                   decoration: BoxDecoration(
                     color: kGreenBg,
                     shape: BoxShape.circle,
-                    border: Border.all(color: kGreen, width: 2),
+                    border: Border.all(color: kGreen.withValues(alpha: 0.3)),
                   ),
-                  child: const Icon(Icons.person_rounded, color: kGreenDark, size: 40),
+                  child: const Icon(
+                    Icons.person_rounded,
+                    color: kGreenDark,
+                    size: 30,
+                  ),
                 ),
-                const SizedBox(height: 10),
-                Text(c.fullName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk)),
-                const SizedBox(height: 2),
-                Text(c.email, style: const TextStyle(fontSize: 13, color: kMuted)),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        c.fullName,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: kInk,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        c.email,
+                        style: const TextStyle(fontSize: 12, color: kMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => _showEditAccountDialog(context),
+                  child: const Text(
+                    'แก้ไข',
+                    style: TextStyle(
+                      color: kGreenDark,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-          const SizedBox(height: 22),
-
-          _InfoCard(
-            title: 'ข้อมูลบัญชี',
-            trailingAction: InkWell(
-              onTap: () => _showEditAccountDialog(context),
-              child: const Text('แก้ไข', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800, fontSize: 13)),
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: kBorder, width: 1.5),
             ),
-            items: {
-              'ชื่อ - นามสกุล': c.fullName,
-              'อีเมล': c.email,
-              'วันเกิด': bDateStr,
-            },
-          ),
-          const SizedBox(height: 14),
-
-          InkWell(
-            onTap: () => Navigator.pushNamed(context, '/change_password'),
-            borderRadius: BorderRadius.circular(18),
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: kBorder, width: 1.5),
-              ),
-              child: const Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.lock_reset_rounded, color: kInk, size: 20),
-                      SizedBox(width: 10),
-                      Text('เปลี่ยนรหัสผ่าน', style: TextStyle(fontWeight: FontWeight.w700, color: kInk)),
-                    ],
+            child: Column(
+              children: [
+                _AccountMenuRow(
+                  icon: Icons.person_outline_rounded,
+                  title: 'ข้อมูลส่วนตัว',
+                  onTap: () => _showEditAccountDialog(context),
+                ),
+                const Divider(height: 1, color: kBorder),
+                _AccountMenuRow(
+                  icon: Icons.monitor_weight_outlined,
+                  title: 'สุขภาพและเป้าหมาย',
+                  onTap: () => Navigator.pushNamed(
+                    context,
+                    '/health',
+                    arguments: {'fromProfile': true},
                   ),
-                  Icon(Icons.chevron_right_rounded, color: kMuted),
-                ],
-              ),
+                ),
+                const Divider(height: 1, color: kBorder),
+                _AccountMenuRow(
+                  icon: Icons.lock_outline_rounded,
+                  title: 'เปลี่ยนรหัสผ่าน',
+                  onTap: () => Navigator.pushNamed(context, '/change_password'),
+                ),
+                const Divider(height: 1, color: kBorder),
+                _AccountMenuRow(
+                  icon: Icons.settings_outlined,
+                  title: 'ตั้งค่าแอป',
+                  onTap: () => Navigator.pushNamed(context, '/account'),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 14),
-
+          const SizedBox(height: 18),
+          _MealStreakCard(content: c),
+          const SizedBox(height: 18),
           _InfoCard(
             title: 'ข้อมูลสุขภาพและเป้าหมาย',
-            trailingAction: InkWell(
-              onTap: () => Navigator.pushNamed(context, '/health', arguments: {'fromProfile': true}),
-              child: const Text('แก้ไข', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800, fontSize: 13)),
-            ),
             items: {
               'เพศ': c.gender,
-              'น้ำหนัก': c.weightKg > 0 ? '${c.weightKg.toStringAsFixed(1)} กิโลกรัม' : '--',
-              'ส่วนสูง': c.heightCm > 0 ? '${c.heightCm.toStringAsFixed(0)} เซนติเมตร' : '--',
+              'น้ำหนัก': c.weightKg > 0
+                  ? '${c.weightKg.toStringAsFixed(1)} กิโลกรัม'
+                  : '--',
+              'ส่วนสูง': c.heightCm > 0
+                  ? '${c.heightCm.toStringAsFixed(0)} เซนติเมตร'
+                  : '--',
               'อายุ': c.birthDate == null ? '--' : '${c.age} ปี',
               'ดัชนีมวลกาย (BMI)': bmi != null ? bmi.toStringAsFixed(1) : '--',
-              'เป้าหมาย': '${c.goalType} (${c.dailyGoal.toStringAsFixed(0)} kcal/วัน)',
+              'เป้าหมาย':
+                  '${c.goalType} (${c.dailyGoal.toStringAsFixed(0)} kcal/วัน)',
             },
             highlightKeys: const {'เป้าหมาย'},
           ),
@@ -5420,21 +7384,52 @@ class ProfileScreen extends StatelessWidget {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   backgroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                  title: const Text('ออกจากระบบ', style: TextStyle(fontWeight: FontWeight.w800)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  title: const Text(
+                    'ออกจากระบบ',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
                   content: const Text('คุณแน่ใจหรือไม่ว่าต้องการออกจากระบบ?'),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(ctx),
-                      child: const Text('ยกเลิก', style: TextStyle(color: kMuted)),
+                      child: const Text(
+                        'ยกเลิก',
+                        style: TextStyle(color: kMuted),
+                      ),
                     ),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(backgroundColor: kRed),
-                      onPressed: () {
-                        context.auth.logout();
-                        Navigator.pushNamedAndRemoveUntil(context, '/', (_) => false);
+                      onPressed: () async {
+                        final content = context.content;
+                        final auth = context.auth;
+                        try {
+                          await content.logout();
+                          auth.logout();
+                          if (context.mounted) {
+                            Navigator.pushNamedAndRemoveUntil(
+                              context,
+                              '/',
+                              (_) => false,
+                            );
+                          }
+                        } catch (error) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('ออกจากระบบไม่สำเร็จ: $error'),
+                                backgroundColor: kRed,
+                              ),
+                            );
+                          }
+                        }
                       },
-                      child: const Text('ยืนยัน', style: TextStyle(color: Colors.white)),
+                      child: const Text(
+                        'ยืนยัน',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
                   ],
                 ),
@@ -5450,15 +7445,145 @@ class ProfileScreen extends StatelessWidget {
   }
 }
 
+class _AccountMenuRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final VoidCallback onTap;
+
+  const _AccountMenuRow({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        child: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: kGreenBg,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, size: 20, color: kGreenDark),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: kInk,
+                ),
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: kMuted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MealStreakCard extends StatelessWidget {
+  final AppContent content;
+  const _MealStreakCard({required this.content});
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final days = List.generate(7, (index) {
+      final date = DateTime(
+        today.year,
+        today.month,
+        today.day,
+      ).subtract(Duration(days: 6 - index));
+      final hasMeal =
+          content.mealsByDate[content.dateKey(date)]?.isNotEmpty ?? false;
+      const weekdayLabels = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+      return (
+        date: date,
+        hasMeal: hasMeal,
+        label: weekdayLabels[date.weekday % 7],
+      );
+    });
+    final activeDays = days.where((day) => day.hasMeal).length;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: kBorder, width: 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            activeDays == 0
+                ? 'เริ่มบันทึกมื้อแรกของคุณ'
+                : 'สัปดาห์นี้บันทึกอาหาร $activeDays/7 วัน',
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: kGreenDark,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'วันที่มีรายการอาหารใน 7 วันล่าสุด',
+            style: TextStyle(fontSize: 12, color: kMuted),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: days.map((day) {
+              return Column(
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: day.hasMeal ? kGreenBg : Colors.grey[100],
+                      shape: BoxShape.circle,
+                      border: Border.all(color: day.hasMeal ? kGreen : kBorder),
+                    ),
+                    child: Icon(
+                      day.hasMeal ? Icons.check_rounded : Icons.close_rounded,
+                      size: 16,
+                      color: day.hasMeal ? kGreenDark : kMuted,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    day.label,
+                    style: const TextStyle(fontSize: 10, color: kMuted),
+                  ),
+                ],
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _InfoCard extends StatelessWidget {
   final String title;
   final StringMap items;
-  final Widget? trailingAction;
   final Set<String> highlightKeys;
   const _InfoCard({
     required this.title,
     required this.items,
-    this.trailingAction,
     this.highlightKeys = const {},
   });
 
@@ -5475,12 +7600,13 @@ class _InfoCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk))),
-              ?trailingAction,
-            ],
+          Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 15,
+              color: kInk,
+            ),
           ),
           const SizedBox(height: 16),
           ...List.generate(entries.length, (i) {
@@ -5492,12 +7618,18 @@ class _InfoCard extends StatelessWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(e.key, style: const TextStyle(color: kMuted, fontSize: 13)),
+                  Text(
+                    e.key,
+                    style: const TextStyle(color: kMuted, fontSize: 13),
+                  ),
                   const SizedBox(width: 8),
                   Flexible(
                     child: isHighlight
                         ? Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
                             decoration: BoxDecoration(
                               color: kGreenBg,
                               borderRadius: BorderRadius.circular(10),
@@ -5505,13 +7637,21 @@ class _InfoCard extends StatelessWidget {
                             child: Text(
                               e.value,
                               textAlign: TextAlign.end,
-                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: kGreenDark),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12,
+                                color: kGreenDark,
+                              ),
                             ),
                           )
                         : Text(
                             e.value,
                             textAlign: TextAlign.end,
-                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: kInk),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 13,
+                              color: kInk,
+                            ),
                           ),
                   ),
                 ],
@@ -5544,23 +7684,58 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
     super.dispose();
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     if (_oldCtrl.text.isEmpty || _newCtrl.text.length < 8) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่อย่างน้อย 8 ตัวอักษร'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text(
+            'กรุณากรอกรหัสผ่านเดิมและรหัสผ่านใหม่อย่างน้อย 8 ตัวอักษร',
+          ),
+          backgroundColor: kRed,
+        ),
       );
       return;
     }
     if (_newCtrl.text != _confirmCtrl.text) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('รหัสผ่านใหม่และการยืนยันไม่ตรงกัน'), backgroundColor: kRed),
+        const SnackBar(
+          content: Text('รหัสผ่านใหม่และการยืนยันไม่ตรงกัน'),
+          backgroundColor: kRed,
+        ),
       );
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('บันทึกรหัสผ่านใหม่สำเร็จแล้ว!'), backgroundColor: kGreen),
-    );
-    Navigator.pop(context);
+    try {
+      final changed = await context.content.changePassword(
+        oldPassword: _oldCtrl.text,
+        newPassword: _newCtrl.text,
+      );
+      if (!mounted) return;
+      if (!changed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('รหัสผ่านเดิมไม่ถูกต้อง'),
+            backgroundColor: kRed,
+          ),
+        );
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('บันทึกรหัสผ่านใหม่สำเร็จแล้ว!'),
+          backgroundColor: kGreen,
+        ),
+      );
+      Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('บันทึกรหัสผ่านไม่สำเร็จ: $error'),
+          backgroundColor: kRed,
+        ),
+      );
+    }
   }
 
   @override
@@ -5572,17 +7747,38 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('รหัสผ่านเดิม', style: TextStyle(fontWeight: FontWeight.w700, color: kInk)),
+            const Text(
+              'รหัสผ่านเดิม',
+              style: TextStyle(fontWeight: FontWeight.w700, color: kInk),
+            ),
             const SizedBox(height: 8),
-            CleanTextField(hint: 'กรอกรหัสผ่านเดิม', obscure: true, controller: _oldCtrl),
+            CleanTextField(
+              hint: 'กรอกรหัสผ่านเดิม',
+              obscure: true,
+              controller: _oldCtrl,
+            ),
             const SizedBox(height: 12),
-            const Text('รหัสผ่านใหม่', style: TextStyle(fontWeight: FontWeight.w700, color: kInk)),
+            const Text(
+              'รหัสผ่านใหม่',
+              style: TextStyle(fontWeight: FontWeight.w700, color: kInk),
+            ),
             const SizedBox(height: 8),
-            CleanTextField(hint: 'กรอกรหัสผ่านใหม่ (อย่างน้อย 8 ตัวอักษร)', obscure: true, controller: _newCtrl),
+            CleanTextField(
+              hint: 'กรอกรหัสผ่านใหม่ (อย่างน้อย 8 ตัวอักษร)',
+              obscure: true,
+              controller: _newCtrl,
+            ),
             const SizedBox(height: 12),
-            const Text('ยืนยันรหัสผ่านใหม่', style: TextStyle(fontWeight: FontWeight.w700, color: kInk)),
+            const Text(
+              'ยืนยันรหัสผ่านใหม่',
+              style: TextStyle(fontWeight: FontWeight.w700, color: kInk),
+            ),
             const SizedBox(height: 8),
-            CleanTextField(hint: 'กรอกรหัสผ่านใหม่อีกครั้ง', obscure: true, controller: _confirmCtrl),
+            CleanTextField(
+              hint: 'กรอกรหัสผ่านใหม่อีกครั้ง',
+              obscure: true,
+              controller: _confirmCtrl,
+            ),
             const Spacer(),
             PrimaryButton('บันทึกรหัสผ่านใหม่', _submit),
           ],
@@ -5596,24 +7792,28 @@ class AccountScreen extends StatelessWidget {
   const AccountScreen({super.key});
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: const CleanAppBar(title: 'ตั้งค่า'),
-        body: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('การแจ้งเตือน'),
-              trailing: Switch(value: true, onChanged: (v) {}, activeTrackColor: kGreen),
-            ),
-            const Divider(color: kBorder),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text('ธีมแอปพลิเคชัน'),
-              trailing: Icon(Icons.chevron_right, color: kMuted),
-            ),
-          ],
+    appBar: const CleanAppBar(title: 'ตั้งค่า'),
+    body: ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('การแจ้งเตือน'),
+          trailing: Switch(
+            value: true,
+            onChanged: (v) {},
+            activeTrackColor: kGreen,
+          ),
         ),
-      );
+        const Divider(color: kBorder),
+        const ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text('ธีมแอปพลิเคชัน'),
+          trailing: Icon(Icons.chevron_right, color: kMuted),
+        ),
+      ],
+    ),
+  );
 }
 
 // ───────────────────────── ADMIN SCREENS ─────────────────────────
@@ -5632,7 +7832,14 @@ class AdminHomeScreen extends StatelessWidget {
         backgroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
-        title: const Text('แผงควบคุมผู้ดูแลระบบ', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: kInk)),
+        title: const Text(
+          'แผงควบคุมผู้ดูแลระบบ',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 18,
+            color: kInk,
+          ),
+        ),
         actions: [
           IconButton(
             tooltip: 'ออกจากระบบแอดมิน',
@@ -5642,24 +7849,44 @@ class AdminHomeScreen extends StatelessWidget {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   backgroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                  title: const Text('ออกจากระบบผู้ดูแลระบบ', style: TextStyle(fontWeight: FontWeight.w800)),
-                  content: const Text('ต้องการออกจากโหมดผู้ดูแลระบบกลับไปยังหน้าเข้าสู่ระบบใช่หรือไม่?'),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  title: const Text(
+                    'ออกจากระบบผู้ดูแลระบบ',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  content: const Text(
+                    'ต้องการออกจากโหมดผู้ดูแลระบบกลับไปยังหน้าเข้าสู่ระบบใช่หรือไม่?',
+                  ),
                   actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ยกเลิก', style: TextStyle(color: kMuted))),
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text(
+                        'ยกเลิก',
+                        style: TextStyle(color: kMuted),
+                      ),
+                    ),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(backgroundColor: kRed),
                       onPressed: () {
                         context.auth.logout();
-                        Navigator.pushNamedAndRemoveUntil(context, '/', (_) => false);
+                        Navigator.pushNamedAndRemoveUntil(
+                          context,
+                          '/',
+                          (_) => false,
+                        );
                       },
-                      child: const Text('ยืนยัน', style: TextStyle(color: Colors.white)),
+                      child: const Text(
+                        'ยืนยัน',
+                        style: TextStyle(color: Colors.white),
+                      ),
                     ),
                   ],
                 ),
               );
             },
-          )
+          ),
         ],
       ),
       body: ListView(
@@ -5680,19 +7907,43 @@ class AdminHomeScreen extends StatelessWidget {
                   children: [
                     const Row(
                       children: [
-                        Icon(Icons.admin_panel_settings_rounded, color: kGreenDark, size: 22),
+                        Icon(
+                          Icons.admin_panel_settings_rounded,
+                          color: kGreenDark,
+                          size: 22,
+                        ),
                         SizedBox(width: 8),
-                        Text('ภาพรวมระบบ (Admin)', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk)),
+                        Text(
+                          'ภาพรวมระบบ (Admin)',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 15,
+                            color: kInk,
+                          ),
+                        ),
                       ],
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                       child: const Row(
                         children: [
                           Icon(Icons.circle, size: 8, color: kGreen),
                           SizedBox(width: 5),
-                          Text('ระบบปกติ', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: kGreenDark)),
+                          Text(
+                            'ระบบปกติ',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                              color: kGreenDark,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -5722,7 +7973,14 @@ class AdminHomeScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 24),
-          const Text('เมนูการจัดการระบบ', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk)),
+          const Text(
+            'เมนูการจัดการระบบ',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: kInk,
+            ),
+          ),
           const SizedBox(height: 12),
           _AdminMenuCard(
             title: 'จัดการบัญชีผู้ใช้ ($userCount)',
@@ -5747,7 +8005,11 @@ class _AdminStatBox extends StatelessWidget {
   final String label;
   final String value;
   final IconData icon;
-  const _AdminStatBox({required this.label, required this.value, required this.icon});
+  const _AdminStatBox({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -5762,9 +8024,23 @@ class _AdminStatBox extends StatelessWidget {
         children: [
           Icon(icon, color: kGreen, size: 20),
           const SizedBox(height: 8),
-          Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk)),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: kInk,
+            ),
+          ),
           const SizedBox(height: 2),
-          Text(label, style: const TextStyle(fontSize: 11, color: kMuted, fontWeight: FontWeight.w600)),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              color: kMuted,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );
@@ -5796,14 +8072,21 @@ class _AdminMenuCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: kBorder, width: 1.5),
           boxShadow: [
-            BoxShadow(color: kInk.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
+            BoxShadow(
+              color: kInk.withValues(alpha: 0.03),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
           ],
         ),
         child: Row(
           children: [
             Container(
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(14)),
+              decoration: BoxDecoration(
+                color: kGreenBg,
+                borderRadius: BorderRadius.circular(14),
+              ),
               child: Icon(icon, color: kGreenDark, size: 24),
             ),
             const SizedBox(width: 14),
@@ -5811,9 +8094,19 @@ class _AdminMenuCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk)),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: kInk,
+                    ),
+                  ),
                   const SizedBox(height: 3),
-                  Text(subtitle, style: const TextStyle(fontSize: 12, color: kMuted)),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(fontSize: 12, color: kMuted),
+                  ),
                 ],
               ),
             ),
@@ -5864,19 +8157,34 @@ class _AdminUsersScreenState extends State<AdminUsersScreen> {
               ),
               child: Column(
                 children: [
-                  const Icon(Icons.person_search_outlined, size: 42, color: kMuted),
+                  const Icon(
+                    Icons.person_search_outlined,
+                    size: 42,
+                    color: kMuted,
+                  ),
                   const SizedBox(height: 10),
-                  const Text('ไม่พบข้อมูลบัญชีผู้ใช้ที่ตรงกับเงื่อนไข', style: TextStyle(fontWeight: FontWeight.w800, color: kInk)),
+                  const Text(
+                    'ไม่พบข้อมูลบัญชีผู้ใช้ที่ตรงกับเงื่อนไข',
+                    style: TextStyle(fontWeight: FontWeight.w800, color: kInk),
+                  ),
                   const SizedBox(height: 8),
                   TextButton(
                     onPressed: () => setState(() => _query = ''),
-                    child: const Text('แสดงผู้ใช้ทั้งหมด', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800)),
+                    child: const Text(
+                      'แสดงผู้ใช้ทั้งหมด',
+                      style: TextStyle(
+                        color: kGreenDark,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
                 ],
               ),
             )
           else
-            ...filtered.map((entry) => _UserCard(id: entry.key, userData: entry.value)),
+            ...filtered.map(
+              (entry) => _UserCard(id: entry.key, userData: entry.value),
+            ),
         ],
       ),
     );
@@ -5903,7 +8211,10 @@ class _UserCard extends StatelessWidget {
           Row(
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
                 decoration: BoxDecoration(
                   color: kGreenBg,
                   borderRadius: BorderRadius.circular(10),
@@ -5920,7 +8231,11 @@ class _UserCard extends StatelessWidget {
               const Spacer(),
               InkWell(
                 borderRadius: BorderRadius.circular(20),
-                onTap: () => Navigator.pushNamed(context, '/admin/users/edit', arguments: id),
+                onTap: () => Navigator.pushNamed(
+                  context,
+                  '/admin/users/edit',
+                  arguments: id,
+                ),
                 child: _outlineBtn('แก้ไข', kGreenDark, Icons.edit_outlined),
               ),
               const SizedBox(width: 8),
@@ -5929,7 +8244,10 @@ class _UserCard extends StatelessWidget {
                 onTap: () {
                   if (context.content.users.length <= 1) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('ไม่สามารถลบบัญชีผู้ใช้สุดท้ายในระบบได้'), backgroundColor: kRed),
+                      const SnackBar(
+                        content: Text('ไม่สามารถลบบัญชีผู้ใช้สุดท้ายในระบบได้'),
+                        backgroundColor: kRed,
+                      ),
                     );
                     return;
                   }
@@ -5937,21 +8255,42 @@ class _UserCard extends StatelessWidget {
                     context: context,
                     builder: (ctx) => AlertDialog(
                       backgroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                      title: const Text('ยืนยันการลบผู้ใช้', style: TextStyle(fontWeight: FontWeight.w800)),
-                      content: Text('ต้องการลบบัญชีของ "${userData['name']}" ใช่หรือไม่?'),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      title: const Text(
+                        'ยืนยันการลบผู้ใช้',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      content: Text(
+                        'ต้องการลบบัญชีของ "${userData['name']}" ใช่หรือไม่?',
+                      ),
                       actions: [
-                        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ยกเลิก', style: TextStyle(color: kMuted))),
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text(
+                            'ยกเลิก',
+                            style: TextStyle(color: kMuted),
+                          ),
+                        ),
                         ElevatedButton(
-                          style: ElevatedButton.styleFrom(backgroundColor: kRed),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: kRed,
+                          ),
                           onPressed: () {
                             context.content.deleteUser(id);
                             Navigator.pop(ctx);
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('ลบบัญชีผู้ใช้เรียบร้อยแล้ว'), backgroundColor: kGreen),
+                              const SnackBar(
+                                content: Text('ลบบัญชีผู้ใช้เรียบร้อยแล้ว'),
+                                backgroundColor: kGreen,
+                              ),
                             );
                           },
-                          child: const Text('ลบ', style: TextStyle(color: Colors.white)),
+                          child: const Text(
+                            'ลบ',
+                            style: TextStyle(color: Colors.white),
+                          ),
                         ),
                       ],
                     ),
@@ -5965,16 +8304,38 @@ class _UserCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('ชื่อผู้ใช้ :', style: TextStyle(color: kMuted, fontSize: 13)),
-              Flexible(child: Text(userData['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.w800, color: kInk))),
+              const Text(
+                'ชื่อผู้ใช้ :',
+                style: TextStyle(color: kMuted, fontSize: 13),
+              ),
+              Flexible(
+                child: Text(
+                  userData['name'] ?? '',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    color: kInk,
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 6),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('อีเมล :', style: TextStyle(color: kMuted, fontSize: 13)),
-              Flexible(child: Text(userData['email'] ?? '', style: const TextStyle(color: kBlue, fontWeight: FontWeight.w600))),
+              const Text(
+                'อีเมล :',
+                style: TextStyle(color: kMuted, fontSize: 13),
+              ),
+              Flexible(
+                child: Text(
+                  userData['email'] ?? '',
+                  style: const TextStyle(
+                    color: kBlue,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
             ],
           ),
         ],
@@ -5985,12 +8346,22 @@ class _UserCard extends StatelessWidget {
   Widget _outlineBtn(String text, Color color, IconData icon) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(borderRadius: BorderRadius.circular(14), border: Border.all(color: color)),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color),
+      ),
       child: Row(
         children: [
           Icon(icon, size: 13, color: color),
           const SizedBox(width: 4),
-          Text(text, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800)),
+          Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
         ],
       ),
     );
@@ -6032,7 +8403,14 @@ class _AdminFoodsScreenState extends State<AdminFoodsScreen> {
             icon: Icons.search,
             onChanged: (v) => setState(() => _search = v),
           ),
-          Text('รายการอาหารในฐานข้อมูล (${foodList.length})', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk)),
+          Text(
+            'รายการอาหารในฐานข้อมูล (${foodList.length})',
+            style: const TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 15,
+              color: kInk,
+            ),
+          ),
           const SizedBox(height: 12),
           if (foodList.isEmpty)
             Container(
@@ -6046,11 +8424,24 @@ class _AdminFoodsScreenState extends State<AdminFoodsScreen> {
                 children: [
                   const Icon(Icons.restaurant_menu, size: 40, color: kMuted),
                   const SizedBox(height: 12),
-                  const Text('ไม่พบข้อมูลอาหารที่ค้นหา', style: TextStyle(fontWeight: FontWeight.bold, color: kInk, fontSize: 14)),
+                  const Text(
+                    'ไม่พบข้อมูลอาหารที่ค้นหา',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: kInk,
+                      fontSize: 14,
+                    ),
+                  ),
                   const SizedBox(height: 8),
                   TextButton(
                     onPressed: () => setState(() => _search = ''),
-                    child: const Text('แสดงเมนูทั้งหมด', style: TextStyle(color: kGreenDark, fontWeight: FontWeight.w800)),
+                    child: const Text(
+                      'แสดงเมนูทั้งหมด',
+                      style: TextStyle(
+                        color: kGreenDark,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -6075,45 +8466,92 @@ class _AdminFoodsScreenState extends State<AdminFoodsScreen> {
                       children: [
                         Container(
                           padding: const EdgeInsets.all(11),
-                          decoration: BoxDecoration(color: kGreenBg, borderRadius: BorderRadius.circular(14)),
-                          child: const Icon(Icons.restaurant_menu_rounded, color: kGreenDark),
+                          decoration: BoxDecoration(
+                            color: kGreenBg,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: const Icon(
+                            Icons.restaurant_menu_rounded,
+                            color: kGreenDark,
+                          ),
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(item['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: kInk)),
-                              if (item['engName'] != null && item['engName']!.isNotEmpty) ...[
+                              Text(
+                                item['name'] ?? '',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 15,
+                                  color: kInk,
+                                ),
+                              ),
+                              if (item['engName'] != null &&
+                                  item['engName']!.isNotEmpty) ...[
                                 const SizedBox(height: 2),
-                                Text('Class: ${item['engName']!} • $category', style: const TextStyle(fontSize: 11, color: kMuted)),
+                                Text(
+                                  'Class: ${item['engName']!} • $category',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: kMuted,
+                                  ),
+                                ),
                               ],
                             ],
                           ),
                         ),
                         IconButton(
                           tooltip: 'ลบเมนู',
-                          icon: const Icon(Icons.delete_outline_rounded, color: kRed),
+                          icon: const Icon(
+                            Icons.delete_outline_rounded,
+                            color: kRed,
+                          ),
                           onPressed: () {
                             showDialog(
                               context: context,
                               builder: (ctx) => AlertDialog(
                                 backgroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                                title: const Text('ยืนยันการลบ', style: TextStyle(fontWeight: FontWeight.w800)),
-                                content: Text('ต้องการลบเมนู "${item['name']}" หรือไม่?'),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                title: const Text(
+                                  'ยืนยันการลบ',
+                                  style: TextStyle(fontWeight: FontWeight.w800),
+                                ),
+                                content: Text(
+                                  'ต้องการลบเมนู "${item['name']}" หรือไม่?',
+                                ),
                                 actions: [
-                                  TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ยกเลิก', style: TextStyle(color: kMuted))),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(ctx),
+                                    child: const Text(
+                                      'ยกเลิก',
+                                      style: TextStyle(color: kMuted),
+                                    ),
+                                  ),
                                   ElevatedButton(
-                                    style: ElevatedButton.styleFrom(backgroundColor: kRed),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: kRed,
+                                    ),
                                     onPressed: () {
                                       context.content.deleteFoodByItem(item);
                                       Navigator.pop(ctx);
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(content: Text('ลบข้อมูลอาหารเรียบร้อยแล้ว'), backgroundColor: kGreen),
-                                      );
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                'ลบข้อมูลอาหารเรียบร้อยแล้ว',
+                                              ),
+                                              backgroundColor: kGreen,
+                                            ),
+                                          );
                                     },
-                                    child: const Text('ลบ', style: TextStyle(color: Colors.white)),
+                                    child: const Text(
+                                      'ลบ',
+                                      style: TextStyle(color: Colors.white),
+                                    ),
                                   ),
                                 ],
                               ),
@@ -6127,7 +8565,10 @@ class _AdminFoodsScreenState extends State<AdminFoodsScreen> {
                       spacing: 6,
                       runSpacing: 6,
                       children: [
-                        _InfoTag(label: '${item['energy']} kcal', isPrimary: true),
+                        _InfoTag(
+                          label: '${item['energy']} kcal',
+                          isPrimary: true,
+                        ),
                         _InfoTag(label: serving),
                       ],
                     ),
@@ -6184,7 +8625,12 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
   String? _engNameError;
   String? _energyError;
 
-  static const _categories = ['อาหารจานเดียว', 'อาหารสุขภาพ', 'ก๋วยเตี๋ยว/เส้น', 'ของว่าง/เครื่องดื่ม'];
+  static const _categories = [
+    'อาหารจานเดียว',
+    'อาหารสุขภาพ',
+    'ก๋วยเตี๋ยว/เส้น',
+    'ของว่าง/เครื่องดื่ม',
+  ];
 
   @override
   void dispose() {
@@ -6211,13 +8657,15 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
       _engNameError = engName.isEmpty
           ? 'กรุณากรอกชื่อ Class AI (ภาษาอังกฤษ)'
           : (!RegExp(r'^[a-zA-Z0-9_ -]+$').hasMatch(engName)
-              ? 'กรุณาใช้ตัวอักษรภาษาอังกฤษ ตัวเลข หรือ _ เท่านั้น'
-              : null);
+                ? 'กรุณาใช้ตัวอักษรภาษาอังกฤษ ตัวเลข หรือ _ เท่านั้น'
+                : null);
       _energyError = energyText.isEmpty
           ? 'กรุณากรอกพลังงาน'
           : (parsedEnergy == null
-              ? 'พลังงานต้องเป็นตัวเลขเท่านั้น'
-              : (parsedEnergy <= 0 || parsedEnergy > 5000 ? 'พลังงานต้องอยู่ระหว่าง 1 - 5,000 kcal' : null));
+                ? 'พลังงานต้องเป็นตัวเลขเท่านั้น'
+                : (parsedEnergy <= 0 || parsedEnergy > 5000
+                      ? 'พลังงานต้องอยู่ระหว่าง 1 - 5,000 kcal'
+                      : null));
     });
 
     return _nameError == null && _engNameError == null && _energyError == null;
@@ -6229,21 +8677,28 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
     context.content.addFood({
       'name': _name.text.trim(),
       'engName': _engName.text.trim(),
-      'serving': _serving.text.trim().isEmpty ? '1 หน่วยบริโภค' : _serving.text.trim(),
+      'serving': _serving.text.trim().isEmpty
+          ? '1 หน่วยบริโภค'
+          : _serving.text.trim(),
       'category': _category,
       'energy': _energy.text.trim(),
       'source': 'admin',
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('เพิ่มข้อมูลโภชนาการอาหารใหม่สำเร็จ'), backgroundColor: kGreen),
+      const SnackBar(
+        content: Text('เพิ่มข้อมูลโภชนาการอาหารใหม่สำเร็จ'),
+        backgroundColor: kGreen,
+      ),
     );
     Navigator.pop(context);
   }
 
   @override
   Widget build(BuildContext context) {
-    final previewName = _name.text.trim().isEmpty ? 'ตัวอย่างชื่อเมนูอาหาร' : _name.text.trim();
+    final previewName = _name.text.trim().isEmpty
+        ? 'ตัวอย่างชื่อเมนูอาหาร'
+        : _name.text.trim();
     final previewKcal = _energy.text.trim().isEmpty ? '0' : _energy.text.trim();
 
     return Scaffold(
@@ -6264,23 +8719,51 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
                       decoration: BoxDecoration(
                         color: kGreenBg,
                         borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: kGreen.withValues(alpha: 0.35)),
+                        border: Border.all(
+                          color: kGreen.withValues(alpha: 0.35),
+                        ),
                       ),
                       child: Row(
                         children: [
                           Container(
                             padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
-                            child: const Icon(Icons.restaurant_menu_rounded, color: kGreenDark),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(
+                              Icons.restaurant_menu_rounded,
+                              color: kGreenDark,
+                            ),
                           ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text('พรีวิวข้อมูลโภชนาการ', style: TextStyle(fontSize: 11, color: kGreenDark, fontWeight: FontWeight.w700)),
-                                Text(previewName, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: kInk)),
-                                Text('$_category • $previewKcal kcal', style: const TextStyle(fontSize: 12, color: kMuted)),
+                                const Text(
+                                  'พรีวิวข้อมูลโภชนาการ',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: kGreenDark,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                Text(
+                                  previewName,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                    color: kInk,
+                                  ),
+                                ),
+                                Text(
+                                  '$_category • $previewKcal kcal',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: kMuted,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -6304,11 +8787,21 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
                       onChanged: (_) => setState(() => _engNameError = null),
                     ),
 
-                    const Text('หมวดหมู่อาหาร', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: kInk)),
+                    const Text(
+                      'หมวดหมู่อาหาร',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                        color: kInk,
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     Container(
                       margin: const EdgeInsets.only(bottom: 18),
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
@@ -6318,9 +8811,21 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
                         child: DropdownButton<String>(
                           value: _category,
                           isExpanded: true,
-                          icon: const Icon(Icons.keyboard_arrow_down, color: kGreen),
+                          icon: const Icon(
+                            Icons.keyboard_arrow_down,
+                            color: kGreen,
+                          ),
                           items: _categories.map((cat) {
-                            return DropdownMenuItem(value: cat, child: Text(cat, style: const TextStyle(fontSize: 14, color: kInk)));
+                            return DropdownMenuItem(
+                              value: cat,
+                              child: Text(
+                                cat,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  color: kInk,
+                                ),
+                              ),
+                            );
                           }).toList(),
                           onChanged: (v) {
                             if (v != null) setState(() => _category = v);
@@ -6348,7 +8853,11 @@ class _AdminAddFoodScreenState extends State<AdminAddFoodScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
-              child: PrimaryButton('บันทึกข้อมูลโภชนาการ', _save, icon: Icons.save_rounded),
+              child: PrimaryButton(
+                'บันทึกข้อมูลโภชนาการ',
+                _save,
+                icon: Icons.save_rounded,
+              ),
             ),
           ],
         ),
@@ -6381,7 +8890,14 @@ class _FoodField extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: kInk)),
+          Text(
+            label,
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: kInk,
+            ),
+          ),
           const SizedBox(height: 8),
           Container(
             height: 52,
@@ -6394,8 +8910,12 @@ class _FoodField extends StatelessWidget {
             child: TextField(
               controller: controller,
               onChanged: onChanged,
-              keyboardType: numeric ? const TextInputType.numberWithOptions(decimal: true) : TextInputType.text,
-              inputFormatters: numeric ? [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))] : null,
+              keyboardType: numeric
+                  ? const TextInputType.numberWithOptions(decimal: true)
+                  : TextInputType.text,
+              inputFormatters: numeric
+                  ? [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))]
+                  : null,
               style: const TextStyle(fontSize: 14, color: kInk),
               decoration: InputDecoration(
                 hintText: hint,
@@ -6410,7 +8930,16 @@ class _FoodField extends StatelessWidget {
               children: [
                 const Icon(Icons.error_outline, size: 13, color: kRed),
                 const SizedBox(width: 4),
-                Expanded(child: Text(errorText!, style: const TextStyle(color: kRed, fontSize: 12, fontWeight: FontWeight.w600))),
+                Expanded(
+                  child: Text(
+                    errorText!,
+                    style: const TextStyle(
+                      color: kRed,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
               ],
             ),
           ],
@@ -6464,7 +8993,9 @@ class _AdminEditUserScreenState extends State<AdminEditUserScreen> {
     final passVal = _resetPassword.text;
 
     final duplicateEmail = context.content.users.entries.any(
-      (e) => e.key != _id && (e.value['email'] ?? '').toLowerCase() == emailVal.toLowerCase(),
+      (e) =>
+          e.key != _id &&
+          (e.value['email'] ?? '').toLowerCase() == emailVal.toLowerCase(),
     );
 
     setState(() {
@@ -6472,8 +9003,10 @@ class _AdminEditUserScreenState extends State<AdminEditUserScreen> {
       _emailError = emailVal.isEmpty
           ? 'กรุณากรอกอีเมลผู้ใช้'
           : (!_emailRegex.hasMatch(emailVal)
-              ? 'รูปแบบอีเมลไม่ถูกต้อง'
-              : (duplicateEmail ? 'อีเมลนี้ถูกใช้งานโดยบัญชีอื่นแล้ว' : null));
+                ? 'รูปแบบอีเมลไม่ถูกต้อง'
+                : (duplicateEmail
+                      ? 'อีเมลนี้ถูกใช้งานโดยบัญชีอื่นแล้ว'
+                      : null));
       _passError = (passVal.isNotEmpty && passVal.length < 8)
           ? 'รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัวอักษร'
           : null;
@@ -6491,7 +9024,14 @@ class _AdminEditUserScreenState extends State<AdminEditUserScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('ชื่อ - นามสกุล *', style: TextStyle(fontWeight: FontWeight.bold, color: kMuted, fontSize: 12)),
+            const Text(
+              'ชื่อ - นามสกุล *',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: kMuted,
+                fontSize: 12,
+              ),
+            ),
             const SizedBox(height: 8),
             CleanTextField(
               hint: 'ชื่อ นามสกุล',
@@ -6501,7 +9041,14 @@ class _AdminEditUserScreenState extends State<AdminEditUserScreen> {
             ),
             if (_nameError != null) FieldError(_nameError!),
 
-            const Text('อีเมล *', style: TextStyle(fontWeight: FontWeight.bold, color: kMuted, fontSize: 12)),
+            const Text(
+              'อีเมล *',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: kMuted,
+                fontSize: 12,
+              ),
+            ),
             const SizedBox(height: 8),
             CleanTextField(
               hint: 'อีเมล',
@@ -6512,7 +9059,14 @@ class _AdminEditUserScreenState extends State<AdminEditUserScreen> {
             ),
             if (_emailError != null) FieldError(_emailError!),
 
-            const Text('รีเซ็ตรหัสผ่านใหม่ (ไม่บังคับ)', style: TextStyle(fontWeight: FontWeight.bold, color: kMuted, fontSize: 12)),
+            const Text(
+              'รีเซ็ตรหัสผ่านใหม่ (ไม่บังคับ)',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: kMuted,
+                fontSize: 12,
+              ),
+            ),
             const SizedBox(height: 8),
             CleanTextField(
               hint: 'กรอกรหัสผ่านใหม่ (อย่างน้อย 8 ตัวอักษร)',
