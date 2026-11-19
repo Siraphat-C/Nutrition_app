@@ -67,6 +67,9 @@ class _LoginScreenState extends State<LoginScreen> {
       // main.dart จะพาไปหน้าถัดไปเองเมื่อสถานะเปลี่ยน
     } on ApiException catch (e) {
       setState(() => _error = e.message);
+    } catch (e) {
+      // ผลลัพธ์จาก backend ไม่ใช่รูปแบบที่แอปรู้จัก (เช่น รัน backend ผิด branch)
+      setState(() => _error = 'อ่านผลจากเซิร์ฟเวอร์ไม่ได้ ตรวจสอบว่ารัน backend จาก branch backend-dev ($e)');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -181,10 +184,33 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _error = null;
     });
     try {
-      await AppState.instance.register(cleanUsername(_username.text), _email.text.trim(), _password.text);
-      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+      await AppState.instance.api.register(cleanUsername(_username.text), _email.text.trim(), _password.text);
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      setState(() {
+        _error = e.message;
+        _busy = false;
+      });
+      return;
+    } catch (e) {
+      setState(() {
+        _error = 'อ่านผลจากเซิร์ฟเวอร์ไม่ได้ ตรวจสอบว่ารัน backend จาก branch backend-dev ($e)';
+        _busy = false;
+      });
+      return;
+    }
+    // สมัครสำเร็จแล้ว ต่อด้วยล็อกอินอัตโนมัติ
+    try {
+      await AppState.instance.login(_email.text.trim(), _password.text);
+      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+    } catch (e) {
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      Navigator.of(context).popUntil((r) => r.isFirst);
+      messenger.showSnackBar(SnackBar(
+        content: Text('สมัครสำเร็จแล้ว แต่เข้าสู่ระบบอัตโนมัติไม่ได้ กรุณาเข้าสู่ระบบอีกครั้ง ($e)'),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 6),
+      ));
     } finally {
       if (mounted) setState(() => _busy = false);
     }

@@ -45,7 +45,9 @@ class ApiClient {
       body = null;
     }
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      return body is Map ? body['data'] : body;
+      if (body is Map && body.containsKey('data')) return body['data'];
+      // backend ตอบไม่ใช่รูปแบบ {success, message, data} = โค้ด backend คนละรุ่น
+      throw ApiException(res.statusCode, 'เซิร์ฟเวอร์ตอบผิดรูปแบบ ตรวจสอบว่ารัน backend จาก branch backend-dev');
     }
     throw ApiException(res.statusCode, _errorMessage(res.statusCode, body));
   }
