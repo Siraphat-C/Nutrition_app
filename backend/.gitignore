@@ -2,3 +2,7 @@
 __pycache__/
 .env
 .pytest_cache/
+
+# ผลการเทรนโมเดล (ไฟล์ใหญ่)
+ml/runs/
+runs/

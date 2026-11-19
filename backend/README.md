@@ -38,12 +38,35 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## API
 
-ทุก endpoint ที่มี 🔒 ต้องส่ง header `Authorization: Bearer <access_token>` (ได้จาก `/api/login`)
+ทุก endpoint ที่มี 🔒 ต้องส่ง header `Authorization: Bearer <access_token>` (ได้จาก `data.access_token` ของ `/api/login`)
+ใน `/docs` API ถูกแบ่งเป็นหมวด: บัญชีผู้ใช้, ข้อมูลส่วนตัว, อาหาร, แอดมิน
+
+### รูปแบบผลลัพธ์
+
+ทุก API ที่สำเร็จตอบรูปแบบเดียวกัน
+```json
+{ "success": true, "message": "ข้อความภาษาไทย", "data": { ... } }
+```
+API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/users`) มี `total`, `limit`, `offset` เพิ่ม
+(`total` เป็น `null` ถ้าขอหน้าที่เกินจำนวนข้อมูล)
+
+ถ้าไม่สำเร็จจะได้ `{ "detail": "ข้อความภาษาไทย" }` พร้อมรหัส
+
+| รหัส | ความหมาย |
+|---|---|
+| 400 | ส่งข้อมูลไม่ครบหรือทำไม่ได้ (เช่น แอดมินลบตัวเอง) |
+| 401 | ยังไม่ล็อกอิน / token หมดอายุหรือถูกยกเลิก |
+| 403 | ไม่มีสิทธิ์ (ไม่ใช่แอดมิน) |
+| 404 | ไม่พบข้อมูล |
+| 409 | ข้อมูลซ้ำ (อีเมล, username, ชื่อเมนู) หรือลบไม่ได้เพราะถูกใช้อยู่ |
+| 413 | ไฟล์รูปใหญ่เกิน |
+| 422 | ข้อมูลผิดรูปแบบหรือเกินช่วงที่กำหนด |
+
 
 | Method | Path | สิทธิ์ | ใช้ทำอะไร |
 |---|---|---|---|
-| POST | `/api/register` | - | สมัครสมาชิก `{username, email, password}` (รหัสผ่าน 8–72 ตัว, ภาษาไทยไม่เกิน 24 ตัว) |
-| POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `access_token` |
+| POST | `/api/register` | - | สมัครสมาชิก `{username, email, password}` (username ไทย/อังกฤษ 3–50 ตัว เว้นวรรคได้ ห้ามซ้ำ; รหัสผ่าน 8–72 ตัว, ภาษาไทยไม่เกิน 24 ตัว) |
+| POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `data.access_token` |
 | GET | `/api/me` | 🔒 | ข้อมูลบัญชี + โปรไฟล์ |
 | GET | `/api/profile` | 🔒 | ข้อมูลส่วนตัว + แคลอรี่ที่ควรได้รับต่อวัน |
 | PUT | `/api/profile` | 🔒 | แก้ข้อมูลส่วนตัว (ส่งเฉพาะฟิลด์ที่แก้) ระบบคำนวณเป้าหมายให้อัตโนมัติ |
@@ -51,11 +74,26 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 | PUT | `/api/account` | 🔒 | แก้ username / เปลี่ยนรหัสผ่าน |
 | POST | `/api/logout` | 🔒 | ออกจากระบบ (token เดิมใช้ไม่ได้ทุกเครื่อง) |
 | POST | `/api/analyze` | 🔒 | ส่งรูป (multipart field `file`, ไม่เกิน 10 MB) วิเคราะห์ชื่อเมนู |
-| POST | `/api/logs` | 🔒 | บันทึกมื้ออาหาร `{food_id, meal_type}` |
-| GET | `/api/logs/today` | 🔒 | ประวัติการกินวันนี้ (เวลาไทย) |
-| GET | `/api/admin/dashboard` | 🔒 admin | ทดสอบสิทธิ์แอดมิน |
+| POST | `/api/logs` | 🔒 | บันทึกมื้ออาหาร `{food_id, meal_type, weight, is_manual_weight}` (weight = กรัม, ค่าเริ่มต้น 300) ระบบคำนวณ `total_calories` ให้ |
+| GET | `/api/logs/today` | 🔒 | มื้อที่กินวันนี้ (เวลาไทย) |
+| GET | `/api/logs?start=YYYY-MM-DD&end=YYYY-MM-DD` | 🔒 | มื้อย้อนหลัง ไม่เกิน 92 วันต่อครั้ง |
+| DELETE | `/api/logs/{log_id}` | 🔒 | ลบมื้อที่บันทึกผิด (ลบได้เฉพาะของตัวเอง) |
+| GET | `/api/dashboard/alerts` | 🔒 | การ์ดเตือนสุขภาพ (`danger`, `warning`, `info`, `good`) + แคลอรี่ 7 วันล่าสุด |
+| GET | `/api/dashboard/summary?month=YYYY-MM` | 🔒 | สรุปรายเดือน: รวม, เฉลี่ย, วันเกิน/พอดี/ขาดเป้า, เมนูยอดนิยม, สัดส่วนตามมื้อ, รายวัน |
+| POST | `/api/weight` | 🔒 | บันทึกน้ำหนักวันนี้ `{weight}` และคำนวณแคลอรี่ต่อวันใหม่ |
+| GET | `/api/weight/history?days=90` | 🔒 | น้ำหนักย้อนหลัง (ใช้วาดกราฟ) |
+| GET | `/api/foods` | 🔒 | รายการเมนู ค้นหาด้วย `?q=` แบ่งหน้าด้วย `?limit=20&offset=0` |
+| GET | `/api/foods/{food_id}` | 🔒 | ดูเมนูเดียว |
+| POST | `/api/admin/login` | - | เข้าสู่ระบบหน้าจัดการ (บัญชีที่ไม่ใช่แอดมินได้ `403`) |
+| GET | `/api/admin/dashboard` | 🔒 admin | ข้อมูลแอดมิน + จำนวนผู้ใช้ แอดมิน และเมนูทั้งหมด |
+| GET | `/api/admin/users` | 🔒 admin | รายการบัญชี ค้นหา username/อีเมลด้วย `?q=` กรองสิทธิ์ด้วย `?role_id=1` |
+| GET | `/api/admin/users/{user_id}` | 🔒 admin | ดูบัญชีเดียว + โปรไฟล์ |
+| POST | `/api/admin/users` | 🔒 admin | เพิ่มบัญชี `{username, email, password, role_id}` |
+| PUT | `/api/admin/users/{user_id}` | 🔒 admin | แก้ไขบัญชี `{username, email, role_id, new_password}` (ส่งเฉพาะที่แก้) |
+| DELETE | `/api/admin/users/{user_id}` | 🔒 admin | ลบบัญชี (โปรไฟล์และประวัติการกินถูกลบตาม) |
 | POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู `{food_name, calories_per_100g}` (0–900 kcal ต่อ 100 กรัม) |
-| DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู |
+| PUT | `/api/admin/foods/{food_id}` | 🔒 admin | แก้ไขเมนู `{food_name, calories_per_100g}` (ส่งเฉพาะที่แก้) |
+| DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู (ถ้ามีผู้ใช้บันทึกเมนูนี้ไว้แล้วได้ `409`) |
 
 ### ข้อมูลส่วนตัว (`PUT /api/profile`)
 
@@ -94,7 +132,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 { "current_password": "old-pass", "new_password": "new-pass-123" }
 ```
 
-เมื่อเปลี่ยนรหัสผ่าน token เก่าทุกเครื่องจะใช้ไม่ได้ และ API จะส่ง `access_token` ใหม่กลับมา
+เมื่อเปลี่ยนรหัสผ่าน token เก่าทุกเครื่องจะใช้ไม่ได้ และ API จะส่ง `data.access_token` ใหม่กลับมา
 แอปต้องเก็บ token ใหม่นี้แทนตัวเดิม
 
 ### ออกจากระบบ (`POST /api/logout`)
@@ -108,9 +146,29 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 - `002_add_token_version.sql` เพิ่มระบบออกจากระบบ
 - `003_calories_only.sql` ตัดโปรตีน คาร์บ ไขมัน ออก เหลือแค่แคลอรี่
+- `004_meals_and_weight.sql` บันทึกมื้อลง `saved_menu` (เพิ่ม `meal_type`) และเพิ่มตาราง `weight_logs`
+
+### ข้อจำกัดของแอดมิน
+
+- แอดมินลดสิทธิ์ตัวเองหรือลบบัญชีตัวเองไม่ได้ (กันไม่ให้ไม่มีใครเข้าหน้าจัดการได้)
+- แอดมินรีเซ็ตรหัสผ่านให้ใคร คนนั้นจะถูกออกจากระบบทุกเครื่อง
+- เปลี่ยนสิทธิ์ (`role_id`) มีผลทันทีกับ token ที่ใช้อยู่
 
 ## ความปลอดภัย
 
 - `SUPABASE_KEY` เป็น service_role key ซึ่งข้ามระบบสิทธิ์ทั้งหมดของฐานข้อมูล ใช้บนเซิร์ฟเวอร์เท่านั้น
 - ทุกตารางเปิด RLS ไว้โดยไม่มี policy ถ้าใครได้ anon key ไปก็อ่านข้อมูลไม่ได้
 - ทุก endpoint ต้องเช็กสิทธิ์ผ่าน `get_current_user` หรือ `require_admin` เสมอ
+
+## เกณฑ์การแจ้งเตือน (`dashboard.py`)
+
+| เกณฑ์ | ค่า | ที่มา |
+|---|---|---|
+| ลดน้ำหนักเร็วเกินไป | เกิน 1 กก./สัปดาห์ | Nutrition ai+ สำนักโภชนาการ กรมอนามัย |
+| กินน้อยเกินไป | เฉลี่ย 7 วันต่ำกว่า BMR หรือ 1,200 (หญิง) / 1,500 (ชาย) kcal | กรมอนามัย (BMR), `nutrition.MIN_CALORIES` |
+| แคลอรี่ ↔ น้ำหนัก | 7,700 kcal = 1 กก. | กรมอนามัย |
+| กินเกินเป้า | เฉลี่ยเกินเป้า 10% และเกินอย่างน้อย 3 วัน | ทีมกำหนด (รออาจารย์ยืนยัน) |
+| น้ำหนักขึ้นเร็ว | เกิน 0.5 กก./สัปดาห์ เมื่อเป้าหมายเป็นลด/คงน้ำหนัก | ทีมกำหนด (รออาจารย์ยืนยัน) |
+| วันที่ "พอดี" | อยู่ในช่วงเป้า ±10% | ทีมกำหนด |
+
+ต้องบันทึกอาหารอย่างน้อย 3 วันใน 7 วัน ระบบจึงจะเตือนเรื่องการกิน และน้ำหนักต้องมีอย่างน้อย 2 จุดห่างกัน 6 วันขึ้นไป
