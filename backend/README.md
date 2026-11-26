@@ -69,7 +69,7 @@ API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/u
 | POST | `/api/login` | - | เข้าสู่ระบบ `{email, password}` ได้ `data.access_token` |
 | GET | `/api/me` | 🔒 | ข้อมูลบัญชี + โปรไฟล์ |
 | GET | `/api/profile` | 🔒 | ข้อมูลส่วนตัว + แคลอรี่ที่ควรได้รับต่อวัน + `bmi`, `allowed_goals` (เป้าหมายที่เลือกได้ตาม BMI), `expected_kg_per_week`/`expected_kg_per_month` |
-| PUT | `/api/profile` | 🔒 | แก้ข้อมูลส่วนตัว (ส่งเฉพาะฟิลด์ที่แก้) ระบบคำนวณเป้าหมายให้อัตโนมัติ เลือกเป้าหมายที่ BMI ไม่อนุญาตได้ `422` |
+| PUT | `/api/profile` | 🔒 | แก้ข้อมูลส่วนตัว (ส่งเฉพาะฟิลด์ที่แก้) ระบบคำนวณเป้าหมายให้อัตโนมัติ เลือกเป้าหมายที่ BMI ไม่อนุญาตได้ `422` ตั้งน้ำหนักเป้าหมายด้วย `target_weight` + `target_weeks` (เปลี่ยนได้ไม่เกิน 1 กก./สัปดาห์, ลดไม่ต่ำกว่า BMI 18.5, เพิ่มไม่ถึง BMI 23) |
 | POST | `/api/profile/preview` | 🔒 | คำนวณเป้าหมายให้ดูก่อน ยังไม่บันทึก |
 | PUT | `/api/account` | 🔒 | แก้ username / เปลี่ยนรหัสผ่าน |
 | POST | `/api/logout` | 🔒 | ออกจากระบบ (token เดิมใช้ไม่ได้ทุกเครื่อง) |
@@ -86,7 +86,7 @@ API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/u
 | POST | `/api/exercise` | 🔒 | บันทึกการออกกำลังกาย `{activity, minutes}` (1–600 นาที) ใช้น้ำหนักจากข้อมูลส่วนตัว คำนวณ `calories_burned` ให้ |
 | GET | `/api/exercise/today` | 🔒 | การออกกำลังกายวันนี้ `{items, total_burned}` |
 | DELETE | `/api/exercise/{exercise_log_id}` | 🔒 | ลบรายการออกกำลังกาย (ลบได้เฉพาะของตัวเอง) |
-| GET | `/api/foods` | 🔒 | รายการเมนู ค้นหาด้วย `?q=` แบ่งหน้าด้วย `?limit=20&offset=0` |
+| GET | `/api/foods` | 🔒 | รายการเมนู ค้นหาชื่อคลาสหรือชื่อไทยด้วย `?q=` แบ่งหน้าด้วย `?limit=20&offset=0` มี `in_model` บอกว่าโมเดลยังทายเมนูนี้ได้ |
 | GET | `/api/foods/{food_id}` | 🔒 | ดูเมนูเดียว |
 | POST | `/api/admin/login` | - | เข้าสู่ระบบหน้าจัดการ (บัญชีที่ไม่ใช่แอดมินได้ `403`) |
 | GET | `/api/admin/dashboard` | 🔒 admin | ข้อมูลแอดมิน + จำนวนผู้ใช้ แอดมิน และเมนูทั้งหมด |
@@ -95,8 +95,9 @@ API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/u
 | POST | `/api/admin/users` | 🔒 admin | เพิ่มบัญชี `{username, email, password, role_id}` |
 | PUT | `/api/admin/users/{user_id}` | 🔒 admin | แก้ไขบัญชี `{username, email, role_id, new_password}` (ส่งเฉพาะที่แก้) |
 | DELETE | `/api/admin/users/{user_id}` | 🔒 admin | ลบบัญชี (โปรไฟล์และประวัติการกินถูกลบตาม) |
-| POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู `{food_name, calories_per_100g}` (0–900 kcal ต่อ 100 กรัม) |
-| PUT | `/api/admin/foods/{food_id}` | 🔒 admin | แก้ไขเมนู `{food_name, calories_per_100g}` (ส่งเฉพาะที่แก้) |
+| POST | `/api/admin/foods` | 🔒 admin | เพิ่มเมนู `{food_name, food_name_th, calories_per_100g}` (0–900 kcal ต่อ 100 กรัม) |
+| POST | `/api/admin/foods/sync` | 🔒 admin | สร้างแถวให้คลาสของโมเดลที่ยังไม่มีใน `foods` (เปิดเซิร์ฟเวอร์ทำให้อัตโนมัติอยู่แล้ว) |
+| PUT | `/api/admin/foods/{food_id}` | 🔒 admin | แก้ไขเมนู `{food_name, food_name_th, calories_per_100g}` (ส่งเฉพาะที่แก้) |
 | DELETE | `/api/admin/foods/{food_id}` | 🔒 admin | ลบเมนู (ถ้ามีผู้ใช้บันทึกเมนูนี้ไว้แล้วได้ `409`) |
 
 ### ข้อมูลส่วนตัว (`PUT /api/profile`)
@@ -152,6 +153,17 @@ API ที่เป็นรายการ (`GET /api/foods`, `GET /api/admin/u
 - `003_calories_only.sql` ตัดโปรตีน คาร์บ ไขมัน ออก เหลือแค่แคลอรี่
 - `004_meals_and_weight.sql` บันทึกมื้อลง `saved_menu` (เพิ่ม `meal_type`) และเพิ่มตาราง `weight_logs`
 - `005_exercise_logs.sql` เพิ่มตาราง `exercise_logs` (บันทึกการออกกำลังกาย)
+- `006_food_name_th.sql` เพิ่มชื่อไทย `foods.food_name_th` ใส่ชื่อไทยให้ 12 เมนูเดิม และให้แคลอรี่ว่างได้ (เมนูใหม่จากโมเดลที่แอดมินยังไม่เติม)
+- `007_target_weight.sql` เพิ่มน้ำหนักเป้าหมาย `target_weight` และวันครบกำหนด `target_date` ใน `user_profiles`
+- `008_target_progress.sql` เพิ่มน้ำหนักตอนเริ่มตั้งเป้า `target_start_weight` และวันที่ตั้ง `target_set_at` (ใช้แสดงว่าลด/เพิ่มไปแล้วเท่าไร)
+
+รัน migration ตอน backend เปิดอยู่ได้ ระบบจะเห็นคอลัมน์ใหม่เองภายใน 30 วินาที ไม่ต้องรีสตาร์ต
+
+### เพิ่มเมนูใหม่
+
+1. เทรนโมเดลใหม่ แล้วเอา `best.pt` มาแทน `models/yolo-cls.pt`
+2. รีสตาร์ต backend: ระบบเพิ่มคลาสใหม่ลงตาราง `foods` ให้เอง
+3. เข้าหน้าแอดมิน → เมนูอาหาร แล้วเติมชื่อไทยกับแคลอรี่ต่อ 100 กรัม (เมนูที่ยังไม่ได้เติมจะบันทึกมื้อไม่ได้)
 
 ### ข้อจำกัดของแอดมิน
 

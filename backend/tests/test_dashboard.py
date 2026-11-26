@@ -52,7 +52,8 @@ def test_month_summary_counts_and_rankings():
     assert s["days_logged"] == 4
     assert s["total_calories"] == 5050
     assert (s["days_over"], s["days_on_target"], s["days_under"]) == (1, 1, 1)
-    assert s["most_frequent"][0] == {"food_name": "khao_man_kai", "times": 2, "calories": 2900}
+    assert s["most_frequent"][0] == {"food_name": "khao_man_kai", "food_name_th": "khao_man_kai",
+                                     "times": 2, "calories": 2900}   # ไม่มีชื่อไทย = ใช้ชื่อคลาส
     assert s["most_calories"][0]["food_name"] == "khao_man_kai"
     assert len(s["daily"]) == 19                       # 1-19 พ.ย. (ยังไม่ถึงวันที่ 20)
     assert abs(sum(s["by_meal"].values()) - 1) < 0.001
@@ -145,3 +146,14 @@ def test_today_over_goal_after_exercise():
     result = build_alerts(meals, [], 1650, 1400, "male", "lose", TODAY, TZ, {TODAY: 500})
     assert "today_over_goal" not in codes(result)
     assert result["last7"][-1]["calories"] == 1500
+
+
+def test_month_summary_counts_net_of_exercise():
+    from datetime import date, datetime, timezone
+    from dashboard import Meal, month_summary
+    day = datetime(2026, 11, 10, 5, tzinfo=timezone.utc)
+    meals = [Meal(day, "lunch", "khao_man_kai", 2500)]
+    plain = month_summary(meals, 2000, 2026, 11, date(2026, 11, 26), timezone.utc)
+    net = month_summary(meals, 2000, 2026, 11, date(2026, 11, 26), timezone.utc, {day.date(): 500})
+    assert plain["days_over"] == 1
+    assert net["days_over"] == 0 and net["days_on_target"] == 1   # 2,500 - 500 = 2,000

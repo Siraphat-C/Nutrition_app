@@ -53,6 +53,10 @@ create table public.user_profiles (
   activity_level     smallint check (activity_level between 1 and 5),
   goal               varchar(50) check (goal in ('lose', 'maintain', 'gain')),
   daily_calories     numeric(7, 2),  -- kcal
+  target_weight      numeric(5, 2) check (target_weight > 0 and target_weight < 400),  -- kg (migration 007)
+  target_date        date,           -- วันที่ตั้งใจถึงน้ำหนักเป้าหมาย
+  target_start_weight numeric(5, 2) check (target_start_weight > 0 and target_start_weight < 400),  -- kg ตอนตั้งเป้า (migration 008)
+  target_set_at      date,           -- วันที่ตั้งเป้า
   calculated_at      timestamptz,
   updated_at         timestamptz not null default now()
 );
@@ -60,11 +64,13 @@ create table public.user_profiles (
 -- ---------------------------------------------------------------------
 -- foods (ตารางที่ 39) - calories per 100 g
 -- food_name must match the class name of the YOLO model exactly.
+-- The server adds a row for every new model class on startup (no Thai name / calories yet).
 -- ---------------------------------------------------------------------
 create table public.foods (
   food_id               integer generated always as identity primary key,
   food_name             varchar(100) not null unique,
-  calories_per_100g     numeric(7, 2) not null check (calories_per_100g >= 0),
+  food_name_th          varchar(100),                         -- ชื่อไทยที่แสดงในแอป (migration 006)
+  calories_per_100g     numeric(7, 2) check (calories_per_100g >= 0),  -- ว่าง = แอดมินยังไม่เติม
   created_at            timestamptz not null default now(),
   updated_at            timestamptz not null default now()
 );

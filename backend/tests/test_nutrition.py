@@ -70,3 +70,73 @@ def test_expected_change_uses_calorie_floor():
     r = calculate_daily_requirement("male", date(2006, 1, 17), 60, 145, 1, "lose", TODAY)
     assert r.daily_calories == 1500                     # TDEE 1,693.5 - 500 = 1,193.5 ต่ำกว่าขั้นต่ำ
     assert expected_change_per_week(r.daily_calories, r.tdee) == -0.18
+
+
+def test_target_weight_range_uses_bmi_limits():
+    from nutrition import target_weight_range
+    assert target_weight_range(160) == (47.4, 58.8)   # BMI 18.5 ถึงต่ำกว่า 23
+
+
+def test_check_target_rules():
+    from nutrition import check_target
+    assert check_target(120, 160, "lose", 115, 5) is None
+    assert "อย่างน้อย 5 สัปดาห์" in check_target(120, 160, "lose", 115, 4)        # เกิน 1 กก./สัปดาห์
+    assert "ต้องน้อยกว่าตอนนี้" in check_target(120, 160, "lose", 125, 10)
+    assert "ต่ำสุด 50.4" in check_target(60, 165, "lose", 45, 30)                  # BMI ต่ำกว่า 18.5
+    assert check_target(60, 170, "gain", 65, 5) is None
+    assert "สูงสุด 66.4" in check_target(60, 170, "gain", 66.5, 10)               # BMI 23 ขึ้นไป
+    assert check_target(60, 170, "maintain", 60, 5) is not None
+
+
+def test_daily_calories_from_target():
+    # ลด 5 กก. ใน 70 วัน = วันละ 5 * 7,700 / 70 = 550 kcal
+    r = calculate_daily_requirement("male", date(2000, 1, 1), 80, 175, 1, "lose", TODAY,
+                                    target_weight=75, target_days=70)
+    assert r.daily_calories == round(r.tdee - 550, 2)
+    # เพิ่ม 5 กก. ใน 70 วัน = วันละ +550 kcal
+    g = calculate_daily_requirement("male", date(2000, 1, 1), 60, 170, 1, "gain", TODAY,
+                                    target_weight=65, target_days=70)
+    assert g.daily_calories == round(g.tdee + 550, 2)
+
+
+def test_expired_or_wrong_direction_target_falls_back():
+    base = calculate_daily_requirement("male", date(2000, 1, 1), 80, 175, 1, "lose", TODAY)
+    for days, target in [(0, 75), (-3, 75), (30, 85)]:
+        r = calculate_daily_requirement("male", date(2000, 1, 1), 80, 175, 1, "lose", TODAY,
+                                        target_weight=target, target_days=days)
+        assert r.daily_calories == base.daily_calories   # ใช้ -500 ตามเดิม
+
+
+def test_target_still_respects_calorie_floor():
+    r = calculate_daily_requirement("female", date(2000, 1, 1), 55, 160, 1, "lose", TODAY,
+                                    target_weight=50, target_days=35)
+    assert r.daily_calories == 1200
+
+
+def test_target_progress_lose():
+    from nutrition import target_progress
+    p = target_progress(90, 82, 60, date(2026, 11, 1), date(2027, 2, 22), date(2026, 11, 26))
+    assert (p["done_kg"], p["remaining_kg"], p["percent"], p["reached"]) == (8, 22, 27, False)
+    assert p["behind_kg"] < 0          # ลดได้เร็วกว่าแผน
+
+
+def test_target_progress_gain_and_wrong_direction():
+    from nutrition import target_progress
+    g = target_progress(60, 61, 65, date(2026, 11, 1), date(2026, 12, 31), date(2026, 11, 26))
+    assert (g["done_kg"], g["percent"]) == (1, 20)
+    assert g["behind_kg"] > 0          # เพิ่มช้ากว่าแผน
+    w = target_progress(90, 92, 60, date(2026, 11, 1), date(2027, 2, 22), date(2026, 11, 26))
+    assert (w["done_kg"], w["percent"], w["remaining_kg"]) == (-2, 0, 32)   # จะลดแต่น้ำหนักขึ้น
+
+
+def test_target_progress_reached():
+    from nutrition import target_progress
+    p = target_progress(90, 59.5, 60, date(2026, 11, 1), date(2027, 2, 22), date(2027, 1, 1))
+    assert p["reached"] and p["percent"] == 100 and p["remaining_kg"] == 0
+
+
+def test_target_adjustment_is_capped_near_deadline():
+    # เพิ่ม 5 กก. เหลือ 2 วัน: ไม่ให้กินเพิ่มเกินวันละ 1,100 kcal (1 กก./สัปดาห์)
+    r = calculate_daily_requirement("male", date(2000, 1, 1), 60, 170, 1, "gain", TODAY,
+                                    target_weight=65, target_days=2)
+    assert r.daily_calories == round(r.tdee + 1100, 2)

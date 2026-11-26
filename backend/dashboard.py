@@ -37,6 +37,7 @@ class Meal:
     meal_type: str
     food_name: str
     calories: float
+    food_name_th: str = ""      # ชื่อไทยจาก foods.food_name_th (ว่าง = ใช้ชื่อคลาส)
 
 
 def local_day(moment: datetime, tz: tzinfo) -> date:
@@ -62,7 +63,8 @@ def classify_day(calories: float, goal: float) -> str:
 def _top_foods(meals: list[Meal], key: str, limit: int = 5) -> list[dict]:
     stats: dict[str, dict] = {}
     for m in meals:
-        s = stats.setdefault(m.food_name, {"food_name": m.food_name, "times": 0, "calories": 0.0})
+        s = stats.setdefault(m.food_name, {"food_name": m.food_name, "food_name_th": m.food_name_th or m.food_name,
+                                           "times": 0, "calories": 0.0})
         s["times"] += 1
         s["calories"] += m.calories
     ranked = sorted(stats.values(), key=lambda s: (-s[key], s["food_name"]))
@@ -70,8 +72,9 @@ def _top_foods(meals: list[Meal], key: str, limit: int = 5) -> list[dict]:
 
 
 def month_summary(meals: list[Meal], goal: float | None, year: int, month: int,
-                  today: date, tz: tzinfo) -> dict:
-    """สรุปเดือน: รวม, เฉลี่ย, วันเกิน/ขาด/พอดี, เมนูยอดนิยม, สัดส่วนตามมื้อ, รายวัน"""
+                  today: date, tz: tzinfo, burned_by_day: dict[date, float] | None = None) -> dict:
+    """สรุปเดือน: รวม, เฉลี่ย, วันเกิน/ขาด/พอดี, เมนูยอดนิยม, สัดส่วนตามมื้อ, รายวัน
+    วันเกิน/ขาด/พอดี เทียบแคลสุทธิ (กิน - ออกกำลังกาย) ให้ตรงกับการแจ้งเตือนและกราฟ 7 วัน"""
     last_day = calendar.monthrange(year, month)[1]
     first = date(year, month, 1)
     last = date(year, month, last_day)
@@ -83,7 +86,8 @@ def month_summary(meals: list[Meal], goal: float | None, year: int, month: int,
     days_logged = len(per_day)
 
     # วันนี้ยังไม่จบ จึงไม่นับเป็นวันเกิน/ขาด/พอดี
-    finished = {d: c for d, c in per_day.items() if d < today}
+    burned = burned_by_day or {}
+    finished = {d: c - burned.get(d, 0.0) for d, c in per_day.items() if d < today}
     counts = {"over": 0, "under": 0, "on_target": 0}
     if goal:
         for c in finished.values():
