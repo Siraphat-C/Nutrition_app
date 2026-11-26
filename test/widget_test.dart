@@ -2,10 +2,11 @@ import 'dart:async';
 
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:material_ui/material_ui.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:nutrition_app/auth_service.dart';
 import 'package:nutrition_app/main.dart';
+import 'package:nutrition_app/util.dart';
 
 void main() {
   testWidgets('shows startup progress until Supabase initializes', (
@@ -49,21 +50,23 @@ void main() {
         .pushNamed('/health');
     await tester.pumpAndSettle();
 
-    expect(find.text('ข้อมูลสุขภาพของคุณ'), findsOneWidget);
-    expect(find.text('ถัดไป'), findsOneWidget);
-
-    Navigator.of(tester.element(find.text('ข้อมูลสุขภาพของคุณ')))
-        .pushNamed('/goal');
-    await tester.pumpAndSettle();
-    expect(find.text('ระดับกิจกรรมประจำวัน'), findsOneWidget);
-    expect(find.text('น้อย'), findsOneWidget);
-    expect(find.text('ปานกลาง'), findsOneWidget);
-    expect(find.text('หนัก'), findsOneWidget);
+  test('bmiCategory ใช้เกณฑ์คนไทย', () {
+    expect(bmiCategory(18.4).label, 'น้ำหนักน้อยเกินไป');
+    expect(bmiCategory(22.9).label, 'น้ำหนักปกติ');
+    expect(bmiCategory(23.7).label, 'น้ำหนักเกินเล็กน้อย');
+    expect(bmiCategory(27).label, 'อ้วน');
+    expect(bmiCategory(31).label, 'อ้วนมาก');
   });
 
-  testWidgets('registered user logs in and opens the dashboard', (
-    WidgetTester tester,
-  ) async {
+  test('allowedGoalsForBmi ปิดปุ่มเป้าหมายตาม BMI', () {
+    // ตัวอย่างอาจารย์: สูง 160 หนัก 120 -> BMI 46.9 เพิ่มน้ำหนักไม่ได้
+    expect(allowedGoalsForBmi(120 / (1.6 * 1.6)), ['lose']);
+    expect(allowedGoalsForBmi(17.0), ['maintain', 'gain']);
+    expect(allowedGoalsForBmi(21.0), ['lose', 'maintain', 'gain']);
+    expect(allowedGoalsForBmi(null), ['lose', 'maintain', 'gain']);
+  });
+
+  testWidgets('เปิดแอปแล้วเห็นหน้าเข้าสู่ระบบ', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final auth = MemoryAuthService();
     final content = AppContent(authService: auth);

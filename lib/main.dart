@@ -15,20 +15,12 @@ import 'auth_service.dart';
 typedef StringMap = Map<String, String>;
 typedef DynamicMap = Map<String, dynamic>;
 
-// ───────────────────────── Theme Colors ─────────────────────────
-const kGreen = Color(0xFF20C96A);
-const kGreenDark = Color(0xFF0E9F55);
-const kGreenBg = Color(0xFFE8F8EF);
-const kInk = Color(0xFF1E293B);
-const kMuted = Color(0xFF64748B);
-const kBorder = Color(0xFFF1F5F9);
-const kRed = Color(0xFFFF4D4F);
-const kRedBg = Color(0xFFFFF1F0);
-const kBlue = Color(0xFF4285F4);
-const kOrange = Color(0xFFFBBC05);
-const kPurple = Color(0xFF8B5CF6);
-
-List<CameraDescription> cameras = [];
+import 'screens/admin_screens.dart';
+import 'screens/auth_screens.dart';
+import 'screens/home_shell.dart';
+import 'screens/setup_screen.dart';
+import 'state/app_state.dart';
+import 'theme.dart';
 
 const _useLocalAuth = bool.fromEnvironment(
   'LOCAL_AUTH',
@@ -1376,69 +1368,18 @@ class _CleanTextFieldState extends State<CleanTextField> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kBorder, width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: kInk.withValues(alpha: 0.03),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: TextField(
-        controller: widget.controller,
-        obscureText: _obscured,
-        keyboardType: widget.keyboardType,
-        inputFormatters: widget.inputFormatters,
-        onChanged: widget.onChanged,
-        style: const TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
-          color: kInk,
-        ),
-        decoration: InputDecoration(
-          hintText: widget.hint,
-          hintStyle: const TextStyle(
-            color: kMuted,
-            fontSize: 14,
-            fontWeight: FontWeight.normal,
-          ),
-          prefixIcon: widget.icon != null
-              ? Icon(widget.icon, color: kMuted, size: 20)
-              : null,
-          suffixIcon: widget.obscure
-              ? IconButton(
-                  icon: Icon(
-                    _obscured
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    color: kMuted,
-                    size: 19,
-                  ),
-                  onPressed: () => setState(() => _obscured = !_obscured),
-                )
-              : (widget.suffixIcon != null
-                    ? Icon(widget.suffixIcon, color: kMuted, size: 18)
-                    : null),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 18,
-            vertical: 15,
-          ),
-        ),
-      ),
+    return MaterialApp(
+      title: 'วิเคราะห์แคลอรี่จากรูปอาหาร',
+      debugShowCheckedModeBanner: false,
+      theme: buildTheme(),
+      home: const _Root(),
     );
   }
 }
 
-class FieldError extends StatelessWidget {
-  final String message;
-  const FieldError(this.message, {super.key});
+/// เลือกหน้าตามสถานะ: ยังไม่ล็อกอิน → แอดมิน → ข้อมูลยังไม่ครบ → หน้าหลัก
+class _Root extends StatelessWidget {
+  const _Root();
 
   @override
   Widget build(BuildContext context) {

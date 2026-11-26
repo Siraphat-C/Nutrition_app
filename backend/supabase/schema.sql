@@ -71,7 +71,7 @@ create table public.foods (
 );
 
 -- ---------------------------------------------------------------------
--- saved_menu (ตารางที่ 40) - used from week 5 (17 Dec) onward
+-- saved_menu (ตารางที่ 40) - meals the user saved (used by /api/logs)
 -- ---------------------------------------------------------------------
 create table public.saved_menu (
   saved_menu_id      integer generated always as identity primary key,
@@ -81,14 +81,45 @@ create table public.saved_menu (
   estimated_weight   numeric(7, 2) not null check (estimated_weight > 0),  -- g
   is_manual_weight   boolean not null default false,  -- true when user typed the weight
   total_calories     numeric(8, 2) not null,
+  meal_type          varchar(20) not null default 'snack'
+                     constraint saved_menu_meal_type_check
+                     check (meal_type in ('breakfast', 'lunch', 'dinner', 'snack')),
   saved_at           timestamptz not null default now()
 );
 
 create index saved_menu_user_saved_at_idx on public.saved_menu (user_id, saved_at desc);
 
 -- ---------------------------------------------------------------------
--- food_logs - TEMPORARY, used by the current /api/logs endpoints.
--- Not in the report. Replace with saved_menu in week 5, then drop.
+-- weight_logs - weight history for the dashboard graph and alerts
+-- ---------------------------------------------------------------------
+create table public.weight_logs (
+  weight_log_id integer generated always as identity primary key,
+  user_id       integer not null references public.users (user_id) on delete cascade,
+  weight        numeric(5, 2) not null check (weight > 0 and weight < 400),  -- kg
+  logged_at     timestamptz not null default now()
+);
+
+create index weight_logs_user_logged_at_idx on public.weight_logs (user_id, logged_at desc);
+
+-- ---------------------------------------------------------------------
+-- exercise_logs - exercise sessions; calories_burned = MET x weight_kg x hours
+-- ---------------------------------------------------------------------
+create table public.exercise_logs (
+  exercise_log_id  integer generated always as identity primary key,
+  user_id          integer not null references public.users (user_id) on delete cascade,
+  activity         varchar(50) not null,                                              -- key in exercise.py
+  met              numeric(4, 1) not null check (met > 0 and met <= 25),
+  duration_minutes integer not null check (duration_minutes between 1 and 600),
+  weight_kg        numeric(5, 2) not null check (weight_kg > 0 and weight_kg < 400),  -- body weight at that time
+  calories_burned  numeric(7, 2) not null check (calories_burned >= 0),
+  logged_at        timestamptz not null default now()
+);
+
+create index exercise_logs_user_logged_at_idx on public.exercise_logs (user_id, logged_at desc);
+
+-- ---------------------------------------------------------------------
+-- food_logs - OLD, used by the current /api/logs endpoints.
+-- Not in the report and no longer used by the API (replaced by saved_menu). Drop when ready.
 -- ---------------------------------------------------------------------
 create table public.food_logs (
   log_id    integer generated always as identity primary key,
@@ -135,3 +166,5 @@ alter table public.user_profiles enable row level security;
 alter table public.foods         enable row level security;
 alter table public.saved_menu    enable row level security;
 alter table public.food_logs     enable row level security;
+alter table public.weight_logs   enable row level security;
+alter table public.exercise_logs enable row level security;

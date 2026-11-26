@@ -4,7 +4,8 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
-        android:label="nutrition_app"
+        android:label="วิเคราะห์แคลอรี่"
+        android:usesCleartextTraffic="true"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

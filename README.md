@@ -1,16 +1,11 @@
-# Nutrition App
+# Nutrition App (full-app)
 
-Flutter application for nutrition tracking and food image capture.
+branch นี้มีครบทั้งแอปและ backend ในที่เดียว
 
-## Requirements
-
-- Flutter stable with Dart SDK `3.14.0` or newer, as specified in `pubspec.yaml`.
-- Android development: Android Studio, Android SDK, and a JDK supported by the installed Flutter/Android Gradle Plugin.
-- Windows desktop development: Visual Studio with the **Desktop development with C++** workload.
-- iOS/macOS development: macOS with Xcode.
-- Web development: a supported browser.
-
-## Run on a new computer
+```
+/            แอป Flutter (UI v2)
+backend/     FastAPI + โมเดล YOLO (ตรงกับ branch backend-dev)
+```
 
 1. Install Flutter and the tooling for the target platform, then add Flutter's `bin` directory to `PATH`.
 2. Clone this repository and open a terminal in the repository root.
@@ -33,35 +28,53 @@ Flutter application for nutrition tracking and food image capture.
 
 4. Fetch the locked dependencies:
 
-   ```sh
-   flutter doctor
-   flutter pub get
-   ```
+```sh
+cd backend
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 5. List available targets and run the app:
 
-   ```sh
-   flutter devices
-   flutter run -d <device-id>
-   ```
-
-   For example, use `flutter run -d windows` for Windows desktop or `flutter run -d <emulator-id>` for Android.
-
-`android/local.properties` contains machine-specific SDK paths and is intentionally not committed. Let Flutter generate it on the new computer; do not copy this file from another computer. Do not commit generated build files or local signing credentials.
-
-## Validate
-
-```sh
-flutter analyze
-flutter test
+```
+SUPABASE_URL=...
+SUPABASE_KEY=...
+SECRET_KEY=...
 ```
 
-Build examples:
-
 ```sh
-flutter build apk
-flutter build web
-flutter build windows
+uvicorn main:app --reload --host 0.0.0.0
 ```
 
-Camera and photo-library access require the platform permissions configured in the Android, iOS, and macOS runner files. Camera hardware is optional; the app can still open without a camera.
+เช็กว่าถูกตัว: เปิด `http://localhost:8000/docs` ต้องเห็นหมวด **แอดมิน** และ `/api/dashboard/alerts`
+
+## 2. รันแอป (เปิดอีก Terminal ที่โฟลเดอร์บนสุด)
+
+```sh
+flutter pub get
+flutter run -d chrome                                   # เว็บ เครื่องเดียวกับ backend
+flutter run -d <device> --dart-define=API_BASE=http://<IP คอม>:8000   # LDPlayer / มือถือ
+```
+
+| รันบน | API_BASE |
+|---|---|
+| Chrome เครื่องเดียวกับ backend | ไม่ต้องใส่ (`http://localhost:8000`) |
+| Android Studio emulator | ไม่ต้องใส่ (`http://10.0.2.2:8000`) |
+| LDPlayer / มือถือจริง | `http://<IP จาก ipconfig>:8000` |
+
+### LDPlayer
+
+1. LDPlayer → Settings → Other settings → ADB debugging → Open local connection แล้วเปิด LDPlayer ใหม่
+2. `"C:\LDPlayer\LDPlayer9\adb.exe" connect 127.0.0.1:5555`
+3. `flutter run -d 127.0.0.1:5555 --dart-define=API_BASE=http://<IP>:8000`
+
+ไม่มีกล้องใน LDPlayer: ลากรูปอาหารใส่หน้าต่าง LDPlayer แล้วกด "เลือกจากคลัง"
+
+## ปัญหาที่เจอบ่อย
+
+| อาการ | แก้ |
+|---|---|
+| `NoSuchMethodError ... access_token` / "เซิร์ฟเวอร์ตอบผิดรูปแบบ" | รัน backend ผิดตัว ต้องรันใน `backend/` ของ branch นี้ |
+| "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ (10.0.2.2)" | ใส่ `--dart-define=API_BASE=...` |
+| build Android พังที่ `mergeDebugJavaResource` | Windows ภาษาไทย (ปี พ.ศ.) แก้แล้วใน `android/gradle.properties` |
