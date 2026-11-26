@@ -1,7 +1,7 @@
 # My Nutrition Secretary API (backend)
 
 FastAPI server ของแอปวิเคราะห์โภชนาการอาหารจากรูปภาพ
-แอป Flutter เรียก API นี้อย่างเดียว ไม่ต่อ Supabase โดยตรง
+แอป Flutter ใช้ Supabase Auth สำหรับสมัครสมาชิก/เข้าสู่ระบบ ส่วน API นี้ยังใช้ระบบบัญชีของตัวเองผ่านตาราง `public.users`
 
 ## ติดตั้ง
 

@@ -2,10 +2,11 @@
 -- Nutrition App - Database schema (Supabase / PostgreSQL)
 -- แอปพลิเคชันวิเคราะห์โภชนาการอาหารจากรูปภาพด้วยปัญญาประดิษฐ์
 --
--- Authentication is done by the FastAPI server (bcrypt + JWT).
+-- The FastAPI API uses its own bcrypt + JWT authentication.
+-- Flutter signup/login uses Supabase Auth (auth.users), not public.users.
 -- FastAPI connects with the service_role / secret key, which bypasses RLS.
 -- RLS is enabled with NO policies, so the public anon key cannot read or
--- write any table. The Flutter app must talk to FastAPI only.
+-- write any public table. Flutter profile and meal data remain local.
 --
 -- Run once in Supabase Dashboard -> SQL Editor on an empty database.
 -- =====================================================================
