@@ -101,6 +101,22 @@ create table public.weight_logs (
 create index weight_logs_user_logged_at_idx on public.weight_logs (user_id, logged_at desc);
 
 -- ---------------------------------------------------------------------
+-- exercise_logs - exercise sessions; calories_burned = MET x weight_kg x hours
+-- ---------------------------------------------------------------------
+create table public.exercise_logs (
+  exercise_log_id  integer generated always as identity primary key,
+  user_id          integer not null references public.users (user_id) on delete cascade,
+  activity         varchar(50) not null,                                              -- key in exercise.py
+  met              numeric(4, 1) not null check (met > 0 and met <= 25),
+  duration_minutes integer not null check (duration_minutes between 1 and 600),
+  weight_kg        numeric(5, 2) not null check (weight_kg > 0 and weight_kg < 400),  -- body weight at that time
+  calories_burned  numeric(7, 2) not null check (calories_burned >= 0),
+  logged_at        timestamptz not null default now()
+);
+
+create index exercise_logs_user_logged_at_idx on public.exercise_logs (user_id, logged_at desc);
+
+-- ---------------------------------------------------------------------
 -- food_logs - OLD, used by the current /api/logs endpoints.
 -- Not in the report and no longer used by the API (replaced by saved_menu). Drop when ready.
 -- ---------------------------------------------------------------------
@@ -150,3 +166,4 @@ alter table public.foods         enable row level security;
 alter table public.saved_menu    enable row level security;
 alter table public.food_logs     enable row level security;
 alter table public.weight_logs   enable row level security;
+alter table public.exercise_logs enable row level security;
