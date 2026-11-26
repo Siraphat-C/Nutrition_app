@@ -154,7 +154,7 @@ class _MonthScreenState extends State<MonthScreen> {
     final daily = ((s['daily'] as List?) ?? []).map((e) => toDouble((e as Map)['calories']) ?? 0).toList();
     List<FoodStat> foods(String key) => ((s[key] as List?) ?? [])
         .map((e) => Map<String, dynamic>.from(e))
-        .map((e) => FoodStat(thaiFoodName(e['food_name'] as String?), (e['times'] as num).toInt(),
+        .map((e) => FoodStat(thaiFoodName(e['food_name'] as String?, e['food_name_th']), (e['times'] as num).toInt(),
             toDouble(e['calories']) ?? 0))
         .toList();
     final byMeal = Map<String, dynamic>.from(s['by_meal'] ?? {});

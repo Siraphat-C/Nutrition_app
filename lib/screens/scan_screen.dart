@@ -32,6 +32,7 @@ class _ScanScreenState extends State<ScanScreen> {
   double? _confidence;
   int? _foodId;
   String? _foodName;
+  String? _foodNameTh;
   double? _per100g;
   double _grams = kDefaultPlateGrams;
   bool _gramsEdited = false;
@@ -49,6 +50,7 @@ class _ScanScreenState extends State<ScanScreen> {
         _error = null;
         _foodId = null;
         _foodName = null;
+        _foodNameTh = null;
         _confidence = null;
         _per100g = null;
         _grams = kDefaultPlateGrams;
@@ -69,6 +71,7 @@ class _ScanScreenState extends State<ScanScreen> {
       final r = await AppState.instance.api.analyze(bytes, filename.isEmpty ? 'food.jpg' : filename);
       setState(() {
         _foodName = r['food_name'] as String?;
+        _foodNameTh = r['food_name_th'] as String?;
         _confidence = (r['confidence'] as num?)?.toDouble();
         _foodId = (r['food_id'] as num?)?.toInt();
         _per100g = (r['calories_per_100g'] as num?)?.toDouble();
@@ -101,7 +104,7 @@ class _ScanScreenState extends State<ScanScreen> {
             ),
             for (final f in _foods!)
               ListTile(
-                title: Text(thaiFoodName(f['food_name'] as String?)),
+                title: Text(thaiFoodName(f['food_name'] as String?, f['food_name_th'])),
                 subtitle: Text(_kcalText((f['calories_per_100g'] as num?)?.toDouble())),
                 trailing: f['food_id'] == _foodId ? const Icon(Icons.check, color: kGreenDark) : null,
                 onTap: () => Navigator.of(context).pop(f),
@@ -114,6 +117,7 @@ class _ScanScreenState extends State<ScanScreen> {
       setState(() {
         _foodId = (picked['food_id'] as num?)?.toInt();
         _foodName = picked['food_name'] as String?;
+        _foodNameTh = picked['food_name_th'] as String?;
         _per100g = (picked['calories_per_100g'] as num?)?.toDouble();
         _confidence = null; // ผู้ใช้เลือกเอง
       });
@@ -132,11 +136,12 @@ class _ScanScreenState extends State<ScanScreen> {
     try {
       await AppState.instance.addMeal(foodId: id, mealType: _meal, grams: _grams, manualWeight: _gramsEdited);
       if (!mounted) return;
-      showSnack(context, 'บันทึก${thaiFoodName(_foodName)} ใน${kMealThai[_meal]}แล้ว');
+      showSnack(context, 'บันทึก${thaiFoodName(_foodName, _foodNameTh)} ใน${kMealThai[_meal]}แล้ว');
       setState(() {
         _image = null;
         _foodId = null;
         _foodName = null;
+        _foodNameTh = null;
       });
       widget.onSaved();
     } catch (e) {
@@ -189,7 +194,7 @@ class _ScanScreenState extends State<ScanScreen> {
           _mealCard(),
           const SizedBox(height: 16),
           FilledButton(
-            onPressed: (_foodId == null || _saving) ? null : _save,
+            onPressed: (_foodId == null || (_per100g ?? 0) <= 0 || _saving) ? null : _save,
             child: _saving
                 ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
                 : Text(_kcal == null ? 'บันทึกมื้อนี้' : 'บันทึกมื้อนี้ (${fmtInt(_kcal!)} kcal)'),
@@ -212,7 +217,7 @@ class _ScanScreenState extends State<ScanScreen> {
           Row(
             children: [
               Expanded(
-                child: Text(thaiFoodName(_foodName),
+                child: Text(thaiFoodName(_foodName, _foodNameTh),
                     style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: kInk)),
               ),
               if (conf != null)
@@ -237,6 +242,10 @@ class _ScanScreenState extends State<ScanScreen> {
           if (_foodId == null) ...[
             const SizedBox(height: 10),
             const Text('เมนูนี้ยังไม่มีในฐานข้อมูล เลือกเมนูอื่นก่อนบันทึก',
+                style: TextStyle(fontSize: 13, color: kRedText, fontWeight: FontWeight.w600)),
+          ] else if ((_per100g ?? 0) <= 0) ...[
+            const SizedBox(height: 10),
+            const Text('เมนูนี้แอดมินยังไม่ได้ใส่แคลอรี่ เลือกเมนูอื่นก่อนบันทึก',
                 style: TextStyle(fontSize: 13, color: kRedText, fontWeight: FontWeight.w600)),
           ],
           const SizedBox(height: 6),

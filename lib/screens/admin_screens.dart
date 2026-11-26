@@ -502,7 +502,12 @@ class _FoodsTabState extends State<_FoodsTab> {
   Future<void> _load() async {
     try {
       final foods = await AppState.instance.api.foods();
-      foods.sort((a, b) => thaiFoodName(a['food_name'] as String?).compareTo(thaiFoodName(b['food_name'] as String?)));
+      // เมนูที่ยังไม่ครบ (ไม่มีชื่อไทยหรือแคลอรี่) ขึ้นก่อน ให้แอดมินเห็นว่าต้องเติม
+      foods.sort((a, b) {
+        final ia = _incomplete(a) ? 0 : 1, ib = _incomplete(b) ? 0 : 1;
+        if (ia != ib) return ia - ib;
+        return _name(a).compareTo(_name(b));
+      });
       if (mounted) {
         setState(() {
           _foods = foods;
@@ -514,13 +519,35 @@ class _FoodsTabState extends State<_FoodsTab> {
     }
   }
 
-  Future<void> _openForm([Map<String, dynamic>? food]) async {
+  static String _name(Map<String, dynamic> f) => thaiFoodName(f['food_name'] as String?, f['food_name_th']);
+  static bool _hasThai(Map<String, dynamic> f) => '${f['food_name_th'] ?? ''}'.trim().isNotEmpty;
+  // 0 kcal = ยังไม่ได้ใส่ค่าจริง (นับแบบเดียวกับหน้าภาพรวมและหน้าสแกน)
+  static bool _noKcal(Map<String, dynamic> f) => (toDouble(f['calories_per_100g']) ?? 0) <= 0;
+  static bool _incomplete(Map<String, dynamic> f) => !_hasThai(f) || _noKcal(f);
+
+  Future<void> _openForm(Map<String, dynamic> food) async {
     final changed = await showDialog<bool>(context: context, builder: (_) => _FoodForm(food: food));
     if (changed == true) await _load();
   }
 
+  bool _syncing = false;
+
+  /// ดึงชื่อคลาสจากโมเดลมาสร้างเป็นเมนู (หลังเปลี่ยนไฟล์โมเดลโดยไม่รีสตาร์ต backend)
+  Future<void> _sync() async {
+    setState(() => _syncing = true);
+    try {
+      final added = await AppState.instance.api.adminSyncFoods();
+      if (mounted) showSnack(context, added.isEmpty ? 'เมนูครบตามโมเดลแล้ว' : 'เพิ่มเมนูใหม่ ${added.length} เมนู กดเพื่อเติมชื่อไทยและแคลอรี่');
+      await _load();
+    } catch (e) {
+      if (mounted) showApiError(context, e);
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
   Future<void> _delete(Map<String, dynamic> f) async {
-    final yes = await _confirm(context, 'ลบเมนู ${thaiFoodName(f['food_name'] as String?)}?',
+    final yes = await _confirm(context, 'ลบเมนู ${_name(f)}?',
         'ถ้ามีผู้ใช้บันทึกเมนูนี้ไว้แล้วจะลบไม่ได้ ถ้าโมเดล AI ยังทายเมนูนี้ได้ ผู้ใช้จะเห็นว่าไม่มีในฐานข้อมูล');
     if (!yes) return;
     try {
@@ -534,66 +561,63 @@ class _FoodsTabState extends State<_FoodsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        RefreshIndicator(
-          color: kGreenDark,
-          onRefresh: _load,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
-            children: [
-              const Text('แคลอรี่คิดต่อ 100 กรัม แตะเมนูเพื่อแก้ไข',
-                  style: TextStyle(fontSize: 13, color: kMuted)),
-              const SizedBox(height: 10),
-              if (_error != null)
-                AlertCard(level: AlertLevel.danger, title: 'โหลดเมนูไม่ได้', detail: _error!)
-              else if (_foods == null)
-                const Padding(padding: EdgeInsets.all(40), child: Center(child: CircularProgressIndicator(color: kGreenDark)))
-              else
-                AppCard(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Column(
-                    children: [
-                      for (var i = 0; i < _foods!.length; i++) ...[
-                        if (i > 0) const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                        _foodTile(_foods![i]),
-                      ],
-                    ],
-                  ),
-                ),
-            ],
+    return RefreshIndicator(
+      color: kGreenDark,
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          const Text('เมนูมาจากโมเดล AI อัตโนมัติ แตะเมนูเพื่อใส่ชื่อไทยและแคลอรี่ต่อ 100 กรัม',
+              style: TextStyle(fontSize: 13, color: kMuted, height: 1.4)),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _syncing ? null : _sync,
+              icon: const Icon(Icons.sync, size: 18, color: kGreenText),
+              label: const Text('ดึงเมนูใหม่จากโมเดล',
+                  style: TextStyle(color: kGreenText, fontWeight: FontWeight.w700)),
+            ),
           ),
-        ),
-        Positioned(
-          right: 16,
-          bottom: 16,
-          child: FloatingActionButton.extended(
-            backgroundColor: kGreen,
-            foregroundColor: Colors.white,
-            onPressed: () => _openForm(),
-            icon: const Icon(Icons.add),
-            label: const Text('เพิ่มเมนู'),
-          ),
-        ),
-      ],
+          const SizedBox(height: 4),
+          if (_error != null)
+            AlertCard(level: AlertLevel.danger, title: 'โหลดเมนูไม่ได้', detail: _error!)
+          else if (_foods == null)
+            const Padding(padding: EdgeInsets.all(40), child: Center(child: CircularProgressIndicator(color: kGreenDark)))
+          else
+            AppCard(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(
+                children: [
+                  for (var i = 0; i < _foods!.length; i++) ...[
+                    if (i > 0) const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                    _foodTile(_foods![i]),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
     );
   }
 
   Widget _foodTile(Map<String, dynamic> f) {
-    final kcal = toDouble(f['calories_per_100g']) ?? 0;
-    final missing = kcal <= 0;
+    final kcal = toDouble(f['calories_per_100g']);
+    final notInModel = f['in_model'] == false;
     return ListTile(
       onTap: () => _openForm(f),
-      title: Text(thaiFoodName(f['food_name'] as String?), style: const TextStyle(fontWeight: FontWeight.w600)),
-      subtitle: Text('${f['food_name']}', style: const TextStyle(fontSize: 12, color: kMuted)),
+      title: Text(_hasThai(f) ? _name(f) : 'ยังไม่มีชื่อไทย',
+          style: TextStyle(fontWeight: FontWeight.w600, color: _hasThai(f) ? kInk : kOrangeText)),
+      subtitle: Text(notInModel ? '${f['food_name']} · โมเดลไม่รู้จักแล้ว' : '${f['food_name']}',
+          style: const TextStyle(fontSize: 12, color: kMuted)),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          missing
+          kcal == null || kcal <= 0
               ? Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(color: kOrangeBg, borderRadius: BorderRadius.circular(99)),
-                  child: const Text('ยังไม่มีข้อมูล',
+                  child: const Text('ยังไม่มีแคลอรี่',
                       style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kOrangeText)),
                 )
               : Text('${fmtInt(kcal)} kcal', style: const TextStyle(fontWeight: FontWeight.w700, color: kInk)),
@@ -608,9 +632,10 @@ class _FoodsTabState extends State<_FoodsTab> {
   }
 }
 
+/// แก้ไขเมนู: ชื่อคลาสมาจากโมเดล แก้ไม่ได้ แอดมินใส่แค่ชื่อไทยกับแคลอรี่
 class _FoodForm extends StatefulWidget {
-  final Map<String, dynamic>? food;
-  const _FoodForm({this.food});
+  final Map<String, dynamic> food;
+  const _FoodForm({required this.food});
 
   @override
   State<_FoodForm> createState() => _FoodFormState();
@@ -618,17 +643,15 @@ class _FoodForm extends StatefulWidget {
 
 class _FoodFormState extends State<_FoodForm> {
   final _form = GlobalKey<FormState>();
-  late final _name = TextEditingController(text: '${widget.food?['food_name'] ?? ''}');
+  late final _nameTh = TextEditingController(text: '${widget.food['food_name_th'] ?? ''}'.trim());
   late final _kcal = TextEditingController(
-      text: widget.food == null ? '' : '${toDouble(widget.food!['calories_per_100g']) ?? 0}');
+      text: toDouble(widget.food['calories_per_100g']) == null ? '' : '${toDouble(widget.food['calories_per_100g'])}');
   bool _busy = false;
   String? _error;
 
-  bool get _editing => widget.food != null;
-
   @override
   void dispose() {
-    _name.dispose();
+    _nameTh.dispose();
     _kcal.dispose();
     super.dispose();
   }
@@ -639,24 +662,19 @@ class _FoodFormState extends State<_FoodForm> {
       _busy = true;
       _error = null;
     });
-    final api = AppState.instance.api;
-    final name = _name.text.trim();
+    final f = widget.food;
+    final nameTh = _nameTh.text.trim();
     final kcal = double.parse(_kcal.text.trim());
+    final fields = <String, dynamic>{
+      if (nameTh != '${f['food_name_th'] ?? ''}'.trim()) 'food_name_th': nameTh,
+      if (kcal != toDouble(f['calories_per_100g'])) 'calories_per_100g': kcal,
+    };
     try {
-      if (_editing) {
-        final f = widget.food!;
-        final fields = <String, dynamic>{
-          if (name != f['food_name']) 'food_name': name,
-          if (kcal != toDouble(f['calories_per_100g'])) 'calories_per_100g': kcal,
-        };
-        if (fields.isEmpty) {
-          if (mounted) Navigator.pop(context, false);
-          return;
-        }
-        await api.adminUpdateFood((f['food_id'] as num).toInt(), fields);
-      } else {
-        await api.adminCreateFood(name, kcal);
+      if (fields.isEmpty) {
+        if (mounted) Navigator.pop(context, false);
+        return;
       }
+      await AppState.instance.api.adminUpdateFood((f['food_id'] as num).toInt(), fields);
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
@@ -668,21 +686,20 @@ class _FoodFormState extends State<_FoodForm> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(_editing ? 'แก้ไขเมนู' : 'เพิ่มเมนู'),
+      title: const Text('แก้ไขเมนู'),
       content: SizedBox(
         width: 380,
         child: Form(
           key: _form,
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text('ชื่อในโมเดล: ${widget.food['food_name']}', style: const TextStyle(fontSize: 13, color: kMuted)),
+              const SizedBox(height: 12),
               TextFormField(
-                controller: _name,
-                decoration: const InputDecoration(
-                  labelText: 'ชื่อเมนู (ชื่อคลาสของโมเดล)',
-                  helperText: 'ต้องตรงกับชื่อที่โมเดล AI ทาย เช่น khao_man_kai',
-                  helperMaxLines: 2,
-                ),
+                controller: _nameTh,
+                decoration: const InputDecoration(labelText: 'ชื่อเมนูภาษาไทย', hintText: 'เช่น ข้าวมันไก่'),
                 validator: (v) {
                   final s = v?.trim() ?? '';
                   if (s.isEmpty || s.length > 100) return 'ยาว 1–100 ตัวอักษร';
@@ -700,14 +717,6 @@ class _FoodFormState extends State<_FoodForm> {
                   return null;
                 },
               ),
-              if (_editing && thaiFoodName(widget.food!['food_name'] as String?) != widget.food!['food_name']) ...[
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('ชื่อในแอป: ${thaiFoodName(widget.food!['food_name'] as String?)}',
-                      style: const TextStyle(fontSize: 12, color: kMuted)),
-                ),
-              ],
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Text(_error!, style: const TextStyle(color: kRedText, fontSize: 13)),
@@ -718,7 +727,7 @@ class _FoodFormState extends State<_FoodForm> {
       ),
       actions: [
         TextButton(onPressed: _busy ? null : () => Navigator.pop(context, false), child: const Text('ยกเลิก')),
-        FilledButton(onPressed: _busy ? null : _save, child: Text(_editing ? 'บันทึก' : 'เพิ่ม')),
+        FilledButton(onPressed: _busy ? null : _save, child: const Text('บันทึก')),
       ],
     );
   }

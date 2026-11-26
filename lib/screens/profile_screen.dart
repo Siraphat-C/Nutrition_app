@@ -88,6 +88,7 @@ class ProfileScreen extends StatelessWidget {
                   _Row('BMI', bmi == null ? '-' : '${bmi.toStringAsFixed(1)} (${cat!.label})'),
                   _Row('กิจกรรม', _activityNames[(p['activity_level'] as num?)?.toInt()] ?? '-'),
                   _Row('เป้าหมาย', _goalNames[p['goal']] ?? '-'),
+                  if (targetText(p) != null) _Row('น้ำหนักเป้าหมาย', targetText(p)!),
                   _Row('แคลอรี่ต่อวัน',
                       app.dailyGoal == null ? '-' : '${fmtInt(app.dailyGoal!)} kcal', strong: true),
                 ],

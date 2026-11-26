@@ -73,7 +73,7 @@ class ExerciseCard extends StatelessWidget {
           ),
           if (items.isEmpty) ...[
             const SizedBox(height: 4),
-            const Text('แคลอรี่ที่เผาผลาญจะถูกหักออกจากแคลอรี่ที่กินวันนี้',
+            const Text('แคลอรี่ที่เผาผลาญจะเพิ่มเข้าไปในแคลอรี่ที่กินได้วันนี้',
                 style: TextStyle(fontSize: 12, color: kOrangeText)),
           ],
           if (app.exerciseError != null) ...[

@@ -38,6 +38,14 @@ class SetupScreen extends StatefulWidget {
 class _SetupScreenState extends State<SetupScreen> {
   final _weight = TextEditingController();
   final _height = TextEditingController();
+  // น้ำหนักเป้าหมาย + ภายในกี่สัปดาห์ (ไม่บังคับ ไม่ใส่ = ลด 500 / เพิ่ม 300 kcal ต่อวันตามเดิม)
+  final _target = TextEditingController();
+  final _weeks = TextEditingController();
+  bool _targetDirty = false;   // ผู้ใช้แก้ตัวเลขเป้าหมายจริง (แค่แตะช่องไม่นับ)
+  bool _hadTarget = false;
+  String _initTarget = '', _initWeeks = '', _initGoal = 'maintain';
+  String _lastTarget = '', _lastWeeks = '';
+  String? _previewError;
   String? _gender;
   DateTime? _birthDate;
   int _activity = 2;
@@ -58,8 +66,19 @@ class _SetupScreenState extends State<SetupScreen> {
     if (p['height'] != null) _height.text = _trim('${p['height']}');
     _activity = (p['activity_level'] as num?)?.toInt() ?? 2;
     _goal = (p['goal'] as String?) ?? 'maintain';
+    if (p['target_active'] == true && p['target_weight'] != null) {
+      _hadTarget = true;
+      _target.text = _trim('${p['target_weight']}');
+      final days = (p['target_days_left'] as num?)?.toInt() ?? 0;
+      _weeks.text = '${(days / 7).ceil().clamp(1, 104)}';
+    }
+    _initTarget = _lastTarget = _target.text;
+    _initWeeks = _lastWeeks = _weeks.text;
+    _initGoal = _goal;
     _weight.addListener(_schedulePreview);
     _height.addListener(_schedulePreview);
+    _target.addListener(_onTargetEdited);
+    _weeks.addListener(_onTargetEdited);
     WidgetsBinding.instance.addPostFrameCallback((_) => _schedulePreview());
   }
 
@@ -68,6 +87,8 @@ class _SetupScreenState extends State<SetupScreen> {
     _debounce?.cancel();
     _weight.dispose();
     _height.dispose();
+    _target.dispose();
+    _weeks.dispose();
     super.dispose();
   }
 
@@ -83,6 +104,69 @@ class _SetupScreenState extends State<SetupScreen> {
     return null;
   }
 
+  void _onTargetEdited() {
+    // controller แจ้งทุกครั้งที่เลื่อนเคอร์เซอร์ด้วย จึงนับเฉพาะตอนตัวเลขเปลี่ยน
+    if (_target.text == _lastTarget && _weeks.text == _lastWeeks) return;
+    _lastTarget = _target.text;
+    _lastWeeks = _weeks.text;
+    _targetDirty = _target.text != _initTarget || _weeks.text != _initWeeks;
+    _schedulePreview();
+  }
+
+  /// เปลี่ยนเป้าหมาย: ล้างน้ำหนักเป้าหมายเดิม (เป้าลดน้ำหนักใช้กับเพิ่มน้ำหนักไม่ได้)
+  void _setGoal(String goal) {
+    if (goal == _goal) return;
+    _goal = goal;
+    if (_target.text.isNotEmpty || _weeks.text.isNotEmpty) {
+      _target.clear();
+      _weeks.clear();
+    }
+  }
+
+  double? get _t => double.tryParse(_target.text.trim());
+  int? get _wk => int.tryParse(_weeks.text.trim());
+  bool get _targetEmpty => _target.text.trim().isEmpty && _weeks.text.trim().isEmpty;
+
+  /// ช่วงน้ำหนักเป้าหมายที่ตั้งได้: ลดได้ไม่ต่ำกว่า BMI 18.5, เพิ่มได้ไม่ถึง BMI 23 (ตรงกับ backend)
+  (double, double)? get _targetRange {
+    final h = _h;
+    if (h == null || _heightError != null) return null;
+    final m2 = (h / 100) * (h / 100);
+    return ((18.5 * m2 * 10).ceil() / 10, ((23 * m2 - 0.01) * 10).floor() / 10);
+  }
+
+  /// จำนวนสัปดาห์น้อยสุด (เปลี่ยนน้ำหนักได้ไม่เกิน 1 กก./สัปดาห์)
+  int? get _minWeeks {
+    final w = _w, t = _t;
+    if (w == null || t == null) return null;
+    final diff = ((t - w).abs() * 100).round() / 100;
+    return diff <= 0 ? 1 : diff.ceil();
+  }
+
+  String? get _targetError {
+    // ตรวจเฉพาะตอนผู้ใช้แก้ เป้าเดิมที่ทำช้ากว่าแผนต้องไม่ทำให้บันทึกข้อมูลอื่นไม่ได้
+    if (!_targetDirty || _goal == 'maintain' || _targetEmpty) return null;
+    final w = _w, t = _t, wk = _wk, range = _targetRange;
+    if (t == null || wk == null) return 'ใส่ทั้งน้ำหนักเป้าหมายและจำนวนสัปดาห์';
+    if (w == null || range == null) return null;
+    if (wk < 1 || wk > 104) return 'ระยะเวลา 1–104 สัปดาห์';
+    if (_goal == 'lose') {
+      if (t >= w) return 'น้ำหนักเป้าหมายต้องน้อยกว่าตอนนี้ (${_trim('$w')} กก.)';
+      if (t < range.$1) return 'ต่ำสุด ${range.$1} กก. (BMI 18.5) ต่ำกว่านี้ผอมเกินไป';
+    } else {
+      if (t <= w) return 'น้ำหนักเป้าหมายต้องมากกว่าตอนนี้ (${_trim('$w')} กก.)';
+      if (t > range.$2) return 'สูงสุด ${range.$2} กก. (BMI ต่ำกว่า 23)';
+    }
+    final need = _minWeeks ?? 1;
+    if (wk < need) return 'เร็วเกินไป ต้องใช้อย่างน้อย $need สัปดาห์ (ไม่เกิน 1 กก./สัปดาห์)';
+    return null;
+  }
+
+  bool get _hasValidTarget => _targetDirty && _goal != 'maintain' && !_targetEmpty && _targetError == null;
+
+  /// เป้าเดิมที่ยังใช้อยู่และผู้ใช้ไม่ได้แก้
+  bool get _keepTarget => _hadTarget && !_targetDirty && _goal == _initGoal;
+
   String? get _heightError {
     final h = _h;
     if (_height.text.trim().isEmpty) return null;
@@ -96,7 +180,8 @@ class _SetupScreenState extends State<SetupScreen> {
       _w != null &&
       _h != null &&
       _weightError == null &&
-      _heightError == null;
+      _heightError == null &&
+      _targetError == null;
 
   Map<String, dynamic> get _fields => {
         'gender': _gender,
@@ -107,7 +192,21 @@ class _SetupScreenState extends State<SetupScreen> {
         'height': _h,
         'activity_level': _activity,
         'goal': _goal,
+        if (_hasValidTarget) ...{'target_weight': _t, 'target_weeks': _wk},
+        if (_keepTarget) 'keep_target': true,
       };
+
+  /// ส่งตอนบันทึก: ส่งน้ำหนักเป้าหมายเฉพาะตอนแก้ (ไม่แก้ = วันครบกำหนดเดิมไม่เลื่อน)
+  Map<String, dynamic> get _saveFields {
+    final f = Map<String, dynamic>.from(_fields)..remove('keep_target');
+    if (!_targetDirty) {
+      f.remove('target_weight');
+      f.remove('target_weeks');
+    } else if (_hadTarget && !_hasValidTarget) {
+      f['clear_target'] = true;
+    }
+    return f;
+  }
 
   double? get _bmi {
     final w = _w, h = _h;
@@ -122,7 +221,7 @@ class _SetupScreenState extends State<SetupScreen> {
     // ถ้ารักษาน้ำหนักก็เลือกไม่ได้ (BMI เกินเกณฑ์) ให้ใช้ตัวแรกที่เลือกได้ คือ "ลดน้ำหนัก"
     final allowed = _allowedGoals;
     if (!allowed.contains(_goal)) {
-      _goal = allowed.contains('maintain') ? 'maintain' : allowed.first;
+      _setGoal(allowed.contains('maintain') ? 'maintain' : allowed.first);
     }
     setState(() {});
     _debounce?.cancel();
@@ -137,9 +236,19 @@ class _SetupScreenState extends State<SetupScreen> {
     setState(() => _previewLoading = true);
     try {
       final data = await AppState.instance.api.previewRequirement(_fields);
-      if (mounted) setState(() => _preview = data);
-    } on ApiException {
-      if (mounted) setState(() => _preview = null);
+      if (mounted) {
+        setState(() {
+          _preview = data;
+          _previewError = null;
+        });
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _preview = null;
+          _previewError = e.message;
+        });
+      }
     } finally {
       if (mounted) setState(() => _previewLoading = false);
     }
@@ -164,7 +273,7 @@ class _SetupScreenState extends State<SetupScreen> {
     if (!_complete) return;
     setState(() => _saving = true);
     try {
-      await AppState.instance.saveProfile(_fields);
+      await AppState.instance.saveProfile(_saveFields);
       if (!mounted) return;
       if (widget.editing) {
         showSnack(context, 'บันทึกข้อมูลแล้ว');
@@ -315,7 +424,7 @@ class _SetupScreenState extends State<SetupScreen> {
                       vertical: true,
                       enabled: _allowedGoals.contains(_goals[i].$1),
                       onTap: () {
-                        _goal = _goals[i].$1;
+                        _setGoal(_goals[i].$1);
                         _schedulePreview();
                       },
                     ),
@@ -332,8 +441,43 @@ class _SetupScreenState extends State<SetupScreen> {
                 style: const TextStyle(fontSize: 12, color: kMuted, height: 1.4),
               ),
             ],
+            if (_goal != 'maintain') ...[
+              const SizedBox(height: 18),
+              _Label(_goal == 'lose' ? 'อยากลดเหลือกี่กิโล (ไม่บังคับ)' : 'อยากเพิ่มเป็นกี่กิโล (ไม่บังคับ)'),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _target,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: const InputDecoration(hintText: 'น้ำหนักเป้าหมาย', suffixText: 'กก.'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _weeks,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(hintText: 'ภายใน', suffixText: 'สัปดาห์'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _targetError ?? _targetHint(),
+                style: TextStyle(fontSize: 12, height: 1.4, color: _targetError != null ? kRedText : kMuted),
+              ),
+            ],
             const SizedBox(height: 20),
-            _PreviewCard(preview: _preview, loading: _previewLoading, complete: _complete),
+            _PreviewCard(
+              preview: _preview,
+              loading: _previewLoading,
+              complete: _complete,
+              error: _previewError,
+              targetWeight: _hasValidTarget ? _t : (_keepTarget ? double.tryParse(_initTarget) : null),
+            ),
             const SizedBox(height: 20),
             FilledButton(
               onPressed: (_complete && !_saving) ? _save : null,
@@ -345,6 +489,16 @@ class _SetupScreenState extends State<SetupScreen> {
         ),
       ),
     );
+  }
+
+  String _targetHint() {
+    final range = _targetRange, need = _minWeeks;
+    final parts = <String>[
+      if (range != null) _goal == 'lose' ? 'ลดได้ต่ำสุด ${range.$1} กก.' : 'เพิ่มได้สูงสุด ${range.$2} กก.',
+      if (need != null && _t != null) 'ต้องใช้อย่างน้อย $need สัปดาห์',
+      'ไม่ใส่ = ${_goal == 'lose' ? 'ลด' : 'เพิ่ม'}แบบปกติ',
+    ];
+    return parts.join(' · ');
   }
 
   static int _ageOf(DateTime birth) {
@@ -489,6 +643,8 @@ class _BmiStrip extends StatelessWidget {
   }
 }
 
+String _trimKg(double v) => v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+
 /// "ลดประมาณ 0.45 กก./สัปดาห์ (1.9 กก./เดือน)" จาก expected_kg_per_week ของ backend
 String? _changeText(Map<String, dynamic>? preview) {
   final week = (preview?['expected_kg_per_week'] as num?)?.toDouble();
@@ -503,7 +659,15 @@ class _PreviewCard extends StatelessWidget {
   final Map<String, dynamic>? preview;
   final bool loading;
   final bool complete;
-  const _PreviewCard({required this.preview, required this.loading, required this.complete});
+  final String? error;
+  final double? targetWeight;
+  const _PreviewCard({
+    required this.preview,
+    required this.loading,
+    required this.complete,
+    this.error,
+    this.targetWeight,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -527,13 +691,18 @@ class _PreviewCard extends StatelessWidget {
                   const Text('กำลังคำนวณ…',
                       style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white))
                 else if (kcal == null)
-                  const Text('คำนวณไม่ได้ ลองใหม่อีกครั้ง',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white))
+                  Text(error ?? 'คำนวณไม่ได้ ลองใหม่อีกครั้ง',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white))
                 else ...[
                   Text('${fmtInt(kcal)} kcal',
                       style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: Colors.white)),
                   if (_changeText(preview) != null)
                     Text(_changeText(preview)!, style: const TextStyle(fontSize: 12, color: Colors.white)),
+                  if (targetWeight != null && DateTime.tryParse('${preview?['target_date']}') != null)
+                    Text(
+                      'ถึง ${_trimKg(targetWeight!)} กก. ภายใน ${fmtThaiShortDate(DateTime.parse('${preview!['target_date']}'))}',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white),
+                    ),
                 ],
               ],
             ),

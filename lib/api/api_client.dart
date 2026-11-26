@@ -217,6 +217,13 @@ class ApiClient {
 
   Future<void> adminUpdateFood(int foodId, Map<String, dynamic> fields) => put('/api/admin/foods/$foodId', fields);
 
+  /// สร้างเมนูให้คลาสของโมเดลที่ยังไม่มีในฐานข้อมูล คืนชื่อคลาสที่เพิ่ม
+  Future<List<String>> adminSyncFoods() async {
+    final data = await post('/api/admin/foods/sync');
+    final added = data is Map ? data['added'] : null;
+    return added is List ? added.map((e) => '$e').toList() : const [];
+  }
+
   Future<void> adminDeleteFood(int foodId) =>
       _send(http.delete(_uri('/api/admin/foods/$foodId'), headers: _headers(json: false)));
 
