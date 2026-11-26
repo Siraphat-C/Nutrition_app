@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -22,12 +23,19 @@ from ultralytics import YOLO
 
 from dashboard import Meal, build_alerts, month_summary, local_day
 from exercise import ACTIVITIES, MAX_MINUTES, MIN_MINUTES, activity_list, calories_burned
+from food_sync import display_name, missing_classes, model_class_names
 from nutrition import (
     KCAL_PER_KG,
+    MAX_TARGET_WEEKS,
     allowed_goals,
     calculate_bmi,
     calculate_daily_requirement,
+    check_target,
     expected_change_per_week,
+    min_target_weeks,
+    target_applies,
+    target_progress,
+    target_weight_range,
 )
 from validation import (
     INT4_MAX,
@@ -106,6 +114,67 @@ model = YOLO(str(Path(__file__).parent / "models" / "yolo-cls.pt"))
 # โมเดลตัวเดียวถูกใช้ร่วมกันทุกคำขอ และ YOLO ไม่รองรับการทำงานพร้อมกันหลายเธรด
 # จึงล็อกให้ประมวลผลทีละรูป
 model_lock = threading.Lock()
+
+
+def has_column(table: str, column: str) -> bool:
+    try:
+        supabase.table(table).select(column).limit(1).execute()
+        return True
+    except APIError:
+        return False
+
+
+# ชื่อไทยของเมนูอยู่ในคอลัมน์ foods.food_name_th (migration 006)
+# ถ้ายังไม่ได้รัน ระบบยังทำงานได้ แต่จะแสดงชื่อคลาสแทนชื่อไทย
+HAS_FOOD_NAME_TH = has_column("foods", "food_name_th")
+if not HAS_FOOD_NAME_TH:
+    logger.warning("ยังไม่มีคอลัมน์ foods.food_name_th ให้รัน supabase/migrations/006_food_name_th.sql")
+FOOD_FIELDS = "food_name, food_name_th, calories_per_100g" if HAS_FOOD_NAME_TH else "food_name, calories_per_100g"
+
+class ColumnCheck:
+    """เช็กว่ามีคอลัมน์แล้วหรือยัง ถ้ายังไม่มีจะเช็กใหม่ทุก 30 วินาที
+    (รัน migration ตอนเซิร์ฟเวอร์เปิดอยู่ ก็ใช้ได้เลยโดยไม่ต้องรีสตาร์ต)"""
+
+    RECHECK_SECONDS = 30
+
+    def __init__(self, table: str, column: str, migration: str):
+        self.table, self.column, self.migration = table, column, migration
+        self._ready = False
+        self._checked_at = 0.0
+        self._check()
+        if not self._ready:
+            logger.warning("ยังไม่มีคอลัมน์ %s.%s ให้รัน supabase/migrations/%s", table, column, migration)
+
+    def _check(self) -> None:
+        self._checked_at = time.monotonic()
+        self._ready = has_column(self.table, self.column)
+
+    def __bool__(self) -> bool:
+        if not self._ready and time.monotonic() - self._checked_at >= self.RECHECK_SECONDS:
+            self._check()
+        return self._ready
+
+
+# น้ำหนักเป้าหมาย + วันครบกำหนด (migration 007) และน้ำหนักตอนเริ่มตั้งเป้า (migration 008)
+HAS_TARGET_WEIGHT = ColumnCheck("user_profiles", "target_weight", "007_target_weight.sql")
+HAS_TARGET_PROGRESS = ColumnCheck("user_profiles", "target_start_weight", "008_target_progress.sql")
+
+
+def sync_foods_with_model() -> list[str]:
+    """สร้างแถวใน foods ให้คลาสของโมเดลที่ยังไม่มี (ยังไม่มีชื่อไทยและแคลอรี่ ให้แอดมินเติม)"""
+    existing = [r["food_name"] for r in supabase.table("foods").select("food_name").execute().data]
+    added = missing_classes(model_class_names(model.names), existing)
+    if added:
+        supabase.table("foods").insert([{"food_name": name} for name in added]).execute()
+    return added
+
+
+try:
+    _added = sync_foods_with_model()
+    if _added:
+        logger.warning("เพิ่มเมนูจากโมเดล %d เมนู (ยังไม่มีชื่อไทย/แคลอรี่): %s", len(_added), ", ".join(_added))
+except APIError:
+    logger.warning("ซิงก์เมนูจากโมเดลไม่ได้ ตรวจสอบว่ารัน supabase/migrations/006_food_name_th.sql แล้ว")
 
 bearer_scheme = HTTPBearer()
 
@@ -246,7 +315,10 @@ BirthDate = Annotated[date, AfterValidator(_check_birth_date)]  # อายุ 1
 Weight = Annotated[float, BeforeValidator(round_2), Field(ge=20, le=300)]    # kg
 Height = Annotated[float, BeforeValidator(round_2), Field(ge=100, le=250)]   # cm
 ActivityLevel = Annotated[int, Field(ge=1, le=5)]
+TargetWeeks = Annotated[int, Field(ge=1, le=MAX_TARGET_WEEKS)]  # จะถึงน้ำหนักเป้าหมายภายในกี่สัปดาห์
 FoodName = Annotated[str, Field(min_length=1, max_length=100)]
+FoodNameTh = Annotated[str, BeforeValidator(lambda v: v.strip() if isinstance(v, str) else v),
+                       Field(min_length=1, max_length=100)]
 Calories = Annotated[float, BeforeValidator(round_2), Field(ge=0, le=900)]  # kcal ต่อ 100 กรัม (ไขมันล้วน = 900)
 DbId = Annotated[int, Field(gt=0, le=INT4_MAX)]
 FoodWeight = Annotated[float, BeforeValidator(round_2), Field(gt=0, le=2000)]  # กรัม ต่อ 1 มื้อ
@@ -272,6 +344,9 @@ class ProfileUpdate(BaseModel):
     height: Height | None = None
     activity_level: ActivityLevel | None = None
     goal: Goal | None = None
+    target_weight: Weight | None = None   # น้ำหนักเป้าหมาย (ส่งคู่กับ target_weeks)
+    target_weeks: TargetWeeks | None = None
+    clear_target: bool | None = None      # true = ยกเลิกน้ำหนักเป้าหมาย
 
 
 class RequirementPreview(BaseModel):
@@ -281,6 +356,9 @@ class RequirementPreview(BaseModel):
     height: Height
     activity_level: ActivityLevel
     goal: Goal
+    target_weight: Weight | None = None
+    target_weeks: TargetWeeks | None = None
+    keep_target: bool | None = None       # true = ใช้น้ำหนักเป้าหมายและวันครบกำหนดที่บันทึกไว้ (ผู้ใช้ไม่ได้แก้)
 
 
 class AccountUpdate(BaseModel):
@@ -310,12 +388,14 @@ class ExerciseLogRequest(BaseModel):
 
 class FoodRequest(BaseModel):
     food_name: FoodName
+    food_name_th: FoodNameTh | None = None
     calories_per_100g: Calories
 
 
 class FoodUpdate(BaseModel):
     """แก้ไขเมนู: ส่งเฉพาะฟิลด์ที่ต้องการแก้"""
     food_name: FoodName | None = None
+    food_name_th: FoodNameTh | None = None
     calories_per_100g: Calories | None = None
 
 
@@ -478,10 +558,12 @@ def body_info(weight, height, requirement=None) -> dict:
     """BMI, เป้าหมายที่เลือกได้ และน้ำหนักที่คาดว่าจะเปลี่ยน (ให้แอปปิดปุ่มที่เลือกไม่ได้)
     requirement = ผลจาก calculate_daily_requirement (ไม่มี = ข้อมูลยังไม่ครบ ไม่คำนวณน้ำหนักที่จะเปลี่ยน)"""
     info = {"bmi": None, "allowed_goals": list(GOAL_NAMES_TH),
-            "expected_kg_per_week": None, "expected_kg_per_month": None}
+            "expected_kg_per_week": None, "expected_kg_per_month": None,
+            "target_min_weight": None, "target_max_weight": None}
     if weight is not None and height is not None:
         info["bmi"] = calculate_bmi(float(weight), float(height))
         info["allowed_goals"] = allowed_goals(float(weight), float(height))
+        info["target_min_weight"], info["target_max_weight"] = target_weight_range(float(height))
     if requirement is not None:
         per_week = expected_change_per_week(requirement.daily_calories, requirement.tdee)
         info["expected_kg_per_week"] = per_week
@@ -491,10 +573,20 @@ def body_info(weight, height, requirement=None) -> dict:
     return info
 
 
+def target_days_left(profile: dict, today: date) -> int | None:
+    """จำนวนวันที่เหลือถึงวันเป้าหมาย (ไม่ได้ตั้งเป้า = None)"""
+    if not profile.get("target_date"):
+        return None
+    return (date.fromisoformat(str(profile["target_date"])) - today).days
+
+
 def requirement_of(profile: dict):
-    """คำนวณเป้าแคลอรี่จากข้อมูลในโปรไฟล์ (ข้อมูลไม่ครบ = None)"""
+    """คำนวณเป้าแคลอรี่จากข้อมูลในโปรไฟล์ (ข้อมูลไม่ครบ = None)
+    ถ้าตั้งน้ำหนักเป้าหมายไว้ คิดจากน้ำหนักที่ต้องเปลี่ยนหารด้วยจำนวนวันที่เหลือ"""
     if not all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS):
         return None
+    today = today_local()
+    target = profile.get("target_weight")
     return calculate_daily_requirement(
         gender=profile["gender"],
         birth_date=date.fromisoformat(str(profile["birth_date"])),
@@ -502,8 +594,41 @@ def requirement_of(profile: dict):
         height=float(profile["height"]),
         activity_level=int(profile["activity_level"]),
         goal=profile["goal"],
-        today=today_local(),
+        today=today,
+        target_weight=None if target is None else float(target),
+        target_days=target_days_left(profile, today),
     )
+
+
+def check_target_or_422(weight, height, goal, target_weight, target_weeks) -> None:
+    if target_weight is None and target_weeks is None:
+        return
+    if target_weight is None or target_weeks is None:
+        raise HTTPException(status_code=422, detail="ตั้งน้ำหนักเป้าหมายต้องใส่ทั้งน้ำหนักและจำนวนสัปดาห์")
+    if not HAS_TARGET_WEIGHT:
+        raise HTTPException(status_code=503, detail="ยังตั้งน้ำหนักเป้าหมายไม่ได้ ให้รัน supabase/migrations/007_target_weight.sql")
+    if weight is None or height is None or goal is None:
+        raise HTTPException(status_code=422, detail="กรอกน้ำหนัก ส่วนสูง และเป้าหมายก่อนตั้งน้ำหนักเป้าหมาย")
+    problem = check_target(float(weight), float(height), goal, float(target_weight), int(target_weeks))
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+
+
+def target_info(profile: dict) -> dict:
+    """ข้อมูลน้ำหนักเป้าหมายสำหรับแอป: จำนวนวันที่เหลือ ยังใช้คำนวณอยู่ไหม และความคืบหน้า"""
+    today = today_local()
+    days = target_days_left(profile, today)
+    weight = profile.get("weight")
+    target = profile.get("target_weight")
+    active = weight is not None and target_applies(
+        profile.get("goal") or "", float(weight), None if target is None else float(target), days)
+    progress = None
+    start, set_at = profile.get("target_start_weight"), profile.get("target_set_at")
+    if weight is not None and target is not None and start is not None and set_at and days is not None:
+        progress = target_progress(
+            float(start), float(weight), float(target),
+            date.fromisoformat(str(set_at)), date.fromisoformat(str(profile["target_date"])), today)
+    return {"target_days_left": days, "target_active": active, "target_progress": progress}
 
 
 def check_goal_allowed(weight, height, goal) -> None:
@@ -519,12 +644,24 @@ def check_goal_allowed(weight, height, goal) -> None:
         )
 
 
+def current_goal(profile: dict, requirement=None) -> float | None:
+    """เป้าแคลต่อวันของวันนี้: คำนวณใหม่ทุกครั้ง (ตั้งน้ำหนักเป้าหมายไว้ ค่าจะเปลี่ยนตามจำนวนวันที่เหลือ
+    และเลยวันครบกำหนดแล้วกลับไปใช้ค่าปกติ) ข้อมูลไม่ครบใช้ค่าที่บันทึกไว้"""
+    requirement = requirement or requirement_of(profile)
+    if requirement is not None:
+        return requirement.daily_calories
+    return float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
+
+
 def with_completeness(profile: dict) -> dict:
     """เพิ่ม is_complete = กรอกข้อมูลส่วนตัวครบทั้ง 6 ช่องหรือยัง พร้อม BMI และเป้าหมายที่เลือกได้"""
+    requirement = requirement_of(profile)
     return {
         **profile,
+        "daily_calories": current_goal(profile, requirement),
         "is_complete": all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS),
-        **body_info(profile.get("weight"), profile.get("height"), requirement_of(profile)),
+        **body_info(profile.get("weight"), profile.get("height"), requirement),
+        **target_info(profile),
     }
 
 
@@ -552,21 +689,33 @@ def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_curre
     current = get_or_create_profile(user_id)
 
     changes = update.model_dump(mode="json", exclude_none=True)
+    target_weeks = changes.pop("target_weeks", None)
+    clear_target = changes.pop("clear_target", None) is True
     merged = {**{f: current.get(f) for f in PROFILE_INPUT_FIELDS}, **changes}
     # เช็กเฉพาะตอนเลือกเป้าหมายใหม่ (บันทึกน้ำหนักอย่างเดียวไม่ถูกบล็อก)
     if "goal" in changes:
         check_goal_allowed(merged["weight"], merged["height"], merged["goal"])
+    check_target_or_422(merged["weight"], merged["height"], merged["goal"],
+                        changes.get("target_weight"), target_weeks)
+    if target_weeks is not None:
+        changes["target_date"] = (today_local() + timedelta(days=7 * target_weeks)).isoformat()
+        if HAS_TARGET_PROGRESS:
+            # จำน้ำหนักตอนเริ่มตั้งเป้า ไว้คำนวณว่าลด/เพิ่มไปแล้วเท่าไร
+            changes["target_start_weight"] = float(merged["weight"])
+            changes["target_set_at"] = today_local().isoformat()
+    elif HAS_TARGET_WEIGHT and current.get("target_weight") is not None and (
+            clear_target or changes.get("goal", current.get("goal")) != current.get("goal")):
+        # ยกเลิกเอง หรือเปลี่ยนเป้าหมาย (เช่น ลด -> รักษา) = ล้างน้ำหนักเป้าหมายเดิม
+        changes["target_weight"] = None
+        changes["target_date"] = None
+        if HAS_TARGET_PROGRESS:
+            changes["target_start_weight"] = None
+            changes["target_set_at"] = None
+    for f in ("target_weight", "target_date"):
+        merged[f] = changes[f] if f in changes else current.get(f)
 
     if all(merged[f] is not None for f in PROFILE_INPUT_FIELDS):
-        requirement = calculate_daily_requirement(
-            gender=merged["gender"],
-            birth_date=date.fromisoformat(str(merged["birth_date"])),
-            weight=float(merged["weight"]),
-            height=float(merged["height"]),
-            activity_level=int(merged["activity_level"]),
-            goal=merged["goal"],
-            today=today_local(),
-        )
+        requirement = requirement_of(merged)
         changes.update({
             "daily_calories": requirement.daily_calories,
             "calculated_at": datetime.now(timezone.utc).isoformat(),
@@ -589,10 +738,26 @@ def _as_float(value) -> float | None:
 def preview_requirement(data: RequirementPreview, current_user: dict = Depends(get_current_user)):
     """คำนวณเป้าหมายให้ดูก่อน ยังไม่บันทึก"""
     check_goal_allowed(data.weight, data.height, data.goal)
-    requirement = calculate_daily_requirement(
-        **data.model_dump(), today=today_local()
-    )
-    return ok("คำนวณสำเร็จ", {**requirement.__dict__, **body_info(data.weight, data.height, requirement)})
+    check_target_or_422(data.weight, data.height, data.goal, data.target_weight, data.target_weeks)
+    fields = data.model_dump(exclude={"target_weight", "target_weeks", "keep_target"})
+    today = today_local()
+    target, days, target_date = None, None, None
+    if data.target_weight is not None and data.target_weeks is not None:
+        target, days = data.target_weight, 7 * data.target_weeks
+        target_date = today + timedelta(days=days)
+    elif data.keep_target:
+        # ไม่ได้แก้น้ำหนักเป้าหมาย: คิดจากค่าที่บันทึกไว้ วันครบกำหนดจะตรงกับตอนบันทึกจริง
+        saved = get_or_create_profile(current_user["user_id"])
+        if saved.get("target_weight") is not None and saved.get("target_date"):
+            target = float(saved["target_weight"])
+            target_date = date.fromisoformat(str(saved["target_date"]))
+            days = (target_date - today).days
+    requirement = calculate_daily_requirement(**fields, today=today, target_weight=target, target_days=days)
+    extra = {}
+    if target is not None and target_applies(data.goal, data.weight, target, days):
+        extra = {"target_date": target_date.isoformat(),
+                 "target_min_weeks": min_target_weeks(data.weight, target)}
+    return ok("คำนวณสำเร็จ", {**requirement.__dict__, **body_info(data.weight, data.height, requirement), **extra})
 
 
 # ==========================================
@@ -678,10 +843,13 @@ def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_
     response = supabase.table("foods").select("*").eq("food_name", predicted_class_name).execute()
     food = response.data[0] if response.data else None
 
+    # 0 kcal = แอดมินยังไม่ได้ใส่ค่าจริง (ไม่มีจานข้าวไหน 0 kcal) ถือว่ายังไม่มีข้อมูล
+    has_calories = bool(food) and float(food.get("calories_per_100g") or 0) > 0
     return ok(
-        "วิเคราะห์สำเร็จ" if food else "วิเคราะห์สำเร็จ แต่ไม่พบข้อมูลแคลอรี่ของเมนูนี้ในฐานข้อมูล",
+        "วิเคราะห์สำเร็จ" if has_calories else "วิเคราะห์สำเร็จ แต่ไม่พบข้อมูลแคลอรี่ของเมนูนี้ในฐานข้อมูล",
         {
             "food_name": predicted_class_name,
+            "food_name_th": (food or {}).get("food_name_th"),
             "confidence": round(confidence_score, 4),
             "food_id": food["food_id"] if food else None,
             "calories_per_100g": food["calories_per_100g"] if food else None,
@@ -694,7 +862,7 @@ def analyze_food(file: UploadFile = File(...), current_user: dict = Depends(get_
 # ==========================================
 MEAL_SELECT = (
     "log_id:saved_menu_id, meal_type, logged_at:saved_at, estimated_weight, is_manual_weight, "
-    "total_calories, food_id, foods(food_name, calories_per_100g)"
+    f"total_calories, food_id, foods({FOOD_FIELDS})"
 )
 MAX_LOG_RANGE_DAYS = 92
 
@@ -723,6 +891,7 @@ def to_meals(rows: list[dict]) -> list[Meal]:
             eaten_at=datetime.fromisoformat(str(r["logged_at"]).replace("Z", "+00:00")),
             meal_type=r["meal_type"],
             food_name=(r.get("foods") or {}).get("food_name") or "unknown",
+            food_name_th=display_name(r.get("foods")),
             calories=float(r["total_calories"] or 0),
         )
         for r in rows
@@ -735,7 +904,9 @@ def create_food_log(log: FoodLogRequest, current_user: dict = Depends(get_curren
     if not rows:
         raise HTTPException(status_code=404, detail="ไม่พบเมนูอาหารนี้")
 
-    per_100g = float(rows[0]["calories_per_100g"] or 0)
+    if float(rows[0]["calories_per_100g"] or 0) <= 0:
+        raise HTTPException(status_code=409, detail="เมนูนี้ยังไม่มีข้อมูลแคลอรี่ ให้แอดมินเติมก่อน")
+    per_100g = float(rows[0]["calories_per_100g"])
     data = {
         "user_id": current_user["user_id"],
         "food_id": log.food_id,
@@ -859,17 +1030,7 @@ def delete_exercise(
 # API 7.1: Dashboard (สรุปรายเดือน, การแจ้งเตือน) และน้ำหนักย้อนหลัง
 # ==========================================
 def requirement_for(profile: dict):
-    if not all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS):
-        return None
-    return calculate_daily_requirement(
-        gender=profile["gender"],
-        birth_date=date.fromisoformat(str(profile["birth_date"])),
-        weight=float(profile["weight"]),
-        height=float(profile["height"]),
-        activity_level=int(profile["activity_level"]),
-        goal=profile["goal"],
-        today=today_local(),
-    )
+    return requirement_of(profile)
 
 
 def fetch_weights(user_id: int, since: date) -> list[dict]:
@@ -890,9 +1051,14 @@ def dashboard_summary(
     first = date(year, mon, 1)
     last = (date(year + (mon == 12), mon % 12 + 1, 1) - timedelta(days=1))
     profile = get_or_create_profile(current_user["user_id"])
-    goal = float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
+    goal = current_goal(profile)
     rows = fetch_meals(current_user["user_id"], first, last)
-    return ok("ดึงข้อมูลสำเร็จ", month_summary(to_meals(rows), goal, year, mon, today_local(), LOCAL_TZ))
+    try:
+        burned = burned_by_day(fetch_exercises(current_user["user_id"], first, last))
+    except APIError:
+        burned = {}
+    return ok("ดึงข้อมูลสำเร็จ",
+              month_summary(to_meals(rows), goal, year, mon, today_local(), LOCAL_TZ, burned))
 
 
 @app.get("/api/dashboard/alerts", tags=["อาหาร"])
@@ -901,7 +1067,7 @@ def dashboard_alerts(current_user: dict = Depends(get_current_user)):
     today = today_local()
     profile = get_or_create_profile(user_id)
     requirement = requirement_for(profile)
-    goal = float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
+    goal = current_goal(profile, requirement)
     meals = to_meals(fetch_meals(user_id, today - timedelta(days=7), today))
     try:
         burned = burned_by_day(fetch_exercises(user_id, today - timedelta(days=7), today))
@@ -949,12 +1115,26 @@ def weight_history(
 @app.post("/api/admin/foods", tags=["แอดมิน"], status_code=status.HTTP_201_CREATED)
 def add_food(food: FoodRequest, admin_user: dict = Depends(require_admin)):
     try:
-        result = supabase.table("foods").insert(food.model_dump()).execute()
+        data = food.model_dump(exclude_none=True)
+        if not HAS_FOOD_NAME_TH:
+            data.pop("food_name_th", None)
+        result = supabase.table("foods").insert(data).execute()
     except APIError as e:
         if is_unique_violation(e):
             raise HTTPException(status_code=409, detail="มีเมนูชื่อนี้อยู่แล้ว")
         raise
     return ok("เพิ่มเมนูอาหารสำเร็จ", result.data[0])
+
+
+@app.post("/api/admin/foods/sync", tags=["แอดมิน"])
+def sync_foods(admin_user: dict = Depends(require_admin)):
+    """ดึงชื่อคลาสจากโมเดล แล้วสร้างแถวให้เมนูที่ยังไม่มี (ตอนเปิดเซิร์ฟเวอร์ทำให้อัตโนมัติอยู่แล้ว)"""
+    try:
+        added = sync_foods_with_model()
+    except APIError:
+        raise HTTPException(status_code=503,
+                            detail="ดึงเมนูจากโมเดลไม่ได้ ให้รัน supabase/migrations/006_food_name_th.sql")
+    return ok(f"เพิ่มเมนูจากโมเดล {len(added)} เมนู" if added else "เมนูครบตามโมเดลแล้ว", {"added": added})
 
 
 @app.delete("/api/admin/foods/{target_food_id}", tags=["แอดมิน"])
@@ -978,6 +1158,8 @@ def update_food(
     admin_user: dict = Depends(require_admin),
 ):
     changes = update.model_dump(exclude_none=True)
+    if not HAS_FOOD_NAME_TH:
+        changes.pop("food_name_th", None)   # ยังไม่ได้รัน migration 006
     if not changes:
         raise HTTPException(status_code=400, detail="ไม่มีข้อมูลที่ต้องการแก้ไข")
 
@@ -1006,8 +1188,16 @@ def list_foods(
     """ค้นหาจากชื่อเมนู (q) และแบ่งหน้าด้วย limit / offset"""
     query = supabase.table("foods").select("*", count="exact")
     if q:
-        query = query.ilike("food_name", f"%{q}%")
-    return ok("ดึงข้อมูลสำเร็จ", **fetch_page(query.order("food_name"), limit, offset))
+        # ตัดอักขระที่ใช้แยกเงื่อนไขของ PostgREST ออก กันคำค้นทำให้ตัวกรองพัง
+        term = "".join(ch for ch in q if ch not in ",()")
+        if HAS_FOOD_NAME_TH:
+            query = query.or_(f"food_name.ilike.%{term}%,food_name_th.ilike.%{term}%")
+        else:
+            query = query.ilike("food_name", f"%{term}%")
+    page = fetch_page(query.order("food_name"), limit, offset)
+    classes = set(model_class_names(model.names))
+    page["data"] = [{**f, "in_model": f["food_name"] in classes} for f in page["data"]]
+    return ok("ดึงข้อมูลสำเร็จ", **page)
 
 
 @app.get("/api/foods/{target_food_id}", tags=["อาหาร"])
