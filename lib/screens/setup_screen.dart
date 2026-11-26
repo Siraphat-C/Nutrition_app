@@ -10,12 +10,14 @@ import '../widgets/common.dart';
 import 'auth_screens.dart';
 
 /// ระดับกิจกรรม 1-5 ตรงกับ backend (ตัวคูณ 1.2 / 1.375 / 1.55 / 1.725 / 1.9)
+/// นับเฉพาะกิจกรรมในชีวิตประจำวัน ไม่รวมการออกกำลังกาย
+/// (การออกกำลังกายนับจากที่ผู้ใช้บันทึกเอง จะได้ไม่นับซ้ำสองครั้ง)
 const _activities = [
-  (1, 'นั่งทำงานเป็นหลัก', 'แทบไม่ได้ออกกำลังกาย'),
-  (2, 'ออกกำลังกายเบาๆ', '1–3 วัน/สัปดาห์'),
-  (3, 'ออกกำลังกายปานกลาง', '3–5 วัน/สัปดาห์'),
-  (4, 'ออกกำลังกายหนัก', '6–7 วัน/สัปดาห์'),
-  (5, 'หนักมาก', 'ทุกวัน หรือใช้แรงงาน'),
+  (1, 'นั่งเป็นหลัก', 'ทำงานโต๊ะ เรียน แทบไม่ได้เดิน'),
+  (2, 'ยืนหรือเดินบ้าง', 'นั่งเป็นส่วนใหญ่ มีเดินไปมาบ้าง'),
+  (3, 'ยืนหรือเดินเกือบทั้งวัน', 'เช่น ครู พนักงานขาย พยาบาล'),
+  (4, 'งานใช้แรง', 'เช่น ยกของ งานก่อสร้างเบา'),
+  (5, 'งานใช้แรงหนัก', 'เช่น แบกหาม งานเกษตร ทั้งวัน'),
 ];
 
 const _goals = [
@@ -113,7 +115,15 @@ class _SetupScreenState extends State<SetupScreen> {
     return w / ((h / 100) * (h / 100));
   }
 
+  List<String> get _allowedGoals => allowedGoalsForBmi(_bmi);
+
   void _schedulePreview() {
+    // น้ำหนัก/ส่วนสูงเปลี่ยนจนเป้าหมายเดิมเลือกไม่ได้ ให้กลับไปที่ "รักษาน้ำหนัก"
+    // ถ้ารักษาน้ำหนักก็เลือกไม่ได้ (BMI เกินเกณฑ์) ให้ใช้ตัวแรกที่เลือกได้ คือ "ลดน้ำหนัก"
+    final allowed = _allowedGoals;
+    if (!allowed.contains(_goal)) {
+      _goal = allowed.contains('maintain') ? 'maintain' : allowed.first;
+    }
     setState(() {});
     _debounce?.cancel();
     if (!_complete) {
@@ -274,6 +284,11 @@ class _SetupScreenState extends State<SetupScreen> {
             ],
             const SizedBox(height: 18),
             const _Label('กิจกรรมในแต่ละวัน'),
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('ไม่ต้องนับการออกกำลังกาย ให้บันทึกในการ์ดออกกำลังกายแทน',
+                  style: TextStyle(fontSize: 12, color: kMuted, height: 1.4)),
+            ),
             for (final a in _activities) ...[
               _OptionRow(
                 title: a.$2,
@@ -298,6 +313,7 @@ class _SetupScreenState extends State<SetupScreen> {
                       icon: _goals[i].$3,
                       selected: _goal == _goals[i].$1,
                       vertical: true,
+                      enabled: _allowedGoals.contains(_goals[i].$1),
                       onTap: () {
                         _goal = _goals[i].$1;
                         _schedulePreview();
@@ -307,6 +323,15 @@ class _SetupScreenState extends State<SetupScreen> {
                 ],
               ],
             ),
+            if (_bmi != null && _allowedGoals.length < _goals.length) ...[
+              const SizedBox(height: 8),
+              Text(
+                _bmi! < 18.5
+                    ? 'BMI ${_bmi!.toStringAsFixed(1)} ต่ำกว่าเกณฑ์ จึงเลือกลดน้ำหนักไม่ได้'
+                    : 'BMI ${_bmi!.toStringAsFixed(1)} เกินเกณฑ์ (23 ขึ้นไป) จึงเลือกได้แค่ลดน้ำหนัก',
+                style: const TextStyle(fontSize: 12, color: kMuted, height: 1.4),
+              ),
+            ],
             const SizedBox(height: 20),
             _PreviewCard(preview: _preview, loading: _previewLoading, complete: _complete),
             const SizedBox(height: 20),
@@ -346,6 +371,7 @@ class _ChoiceChip extends StatelessWidget {
   final IconData icon;
   final bool selected;
   final bool vertical;
+  final bool enabled;
   final VoidCallback onTap;
   const _ChoiceChip({
     required this.label,
@@ -353,6 +379,7 @@ class _ChoiceChip extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.vertical = false,
+    this.enabled = true,
   });
 
   @override
@@ -370,20 +397,25 @@ class _ChoiceChip extends StatelessWidget {
     return Semantics(
       selected: selected,
       button: true,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: onTap,
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 54),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-          decoration: BoxDecoration(
-            color: selected ? kGreenBg : Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: selected ? kGreen : kBorder, width: selected ? 2 : 1),
+      enabled: enabled,
+      child: Opacity(
+        // ปุ่มที่เลือกไม่ได้ตาม BMI จะจางลงและกดไม่ได้
+        opacity: enabled ? 1 : 0.35,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: enabled ? onTap : null,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 54),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+            decoration: BoxDecoration(
+              color: selected ? kGreenBg : Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: selected ? kGreen : kBorder, width: selected ? 2 : 1),
+            ),
+            child: vertical
+                ? Column(mainAxisSize: MainAxisSize.min, children: children)
+                : Row(mainAxisAlignment: MainAxisAlignment.center, children: children),
           ),
-          child: vertical
-              ? Column(mainAxisSize: MainAxisSize.min, children: children)
-              : Row(mainAxisAlignment: MainAxisAlignment.center, children: children),
         ),
       ),
     );
@@ -457,6 +489,16 @@ class _BmiStrip extends StatelessWidget {
   }
 }
 
+/// "ลดประมาณ 0.45 กก./สัปดาห์ (1.9 กก./เดือน)" จาก expected_kg_per_week ของ backend
+String? _changeText(Map<String, dynamic>? preview) {
+  final week = (preview?['expected_kg_per_week'] as num?)?.toDouble();
+  final month = (preview?['expected_kg_per_month'] as num?)?.toDouble();
+  if (week == null || month == null || week == 0) return null;
+  final verb = week < 0 ? 'ลด' : 'เพิ่ม';
+  return 'ถ้ากินตามเป้า น้ำหนักจะ$verbประมาณ ${week.abs().toStringAsFixed(2)} กก./สัปดาห์ '
+      '(${month.abs().toStringAsFixed(1)} กก./เดือน)';
+}
+
 class _PreviewCard extends StatelessWidget {
   final Map<String, dynamic>? preview;
   final bool loading;
@@ -487,9 +529,12 @@ class _PreviewCard extends StatelessWidget {
                 else if (kcal == null)
                   const Text('คำนวณไม่ได้ ลองใหม่อีกครั้ง',
                       style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white))
-                else
+                else ...[
                   Text('${fmtInt(kcal)} kcal',
                       style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: Colors.white)),
+                  if (_changeText(preview) != null)
+                    Text(_changeText(preview)!, style: const TextStyle(fontSize: 12, color: Colors.white)),
+                ],
               ],
             ),
           ),

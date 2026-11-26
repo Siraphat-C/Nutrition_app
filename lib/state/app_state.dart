@@ -52,6 +52,45 @@ class HealthAlert {
       );
 }
 
+/// การออกกำลังกายที่บันทึก (จาก /api/exercise/today)
+class ExerciseLog {
+  final int id;
+  final String activity;
+  final String name;
+  final int minutes;
+  final double caloriesBurned;
+  final DateTime loggedAt;
+
+  ExerciseLog({
+    required this.id,
+    required this.activity,
+    required this.name,
+    required this.minutes,
+    required this.caloriesBurned,
+    required this.loggedAt,
+  });
+
+  factory ExerciseLog.fromJson(Map<String, dynamic> j) => ExerciseLog(
+        id: (j['exercise_log_id'] as num).toInt(),
+        activity: '${j['activity']}',
+        name: '${j['name_th'] ?? j['activity']}',
+        minutes: (j['duration_minutes'] as num?)?.toInt() ?? 0,
+        caloriesBurned: toDouble(j['calories_burned']) ?? 0,
+        loggedAt: DateTime.tryParse('${j['logged_at']}')?.toLocal() ?? DateTime.now(),
+      );
+}
+
+/// กิจกรรมที่เลือกได้ (จาก /api/exercise/activities)
+class ExerciseActivity {
+  final String key;
+  final String name;
+  final double met;
+  ExerciseActivity(this.key, this.name, this.met);
+
+  factory ExerciseActivity.fromJson(Map<String, dynamic> j) =>
+      ExerciseActivity('${j['key']}', '${j['name_th']}', toDouble(j['met']) ?? 1);
+}
+
 class DayTotal {
   final DateTime date;
   final double calories;
@@ -73,6 +112,9 @@ class AppState extends ChangeNotifier {
   Map<String, dynamic>? user;
   Map<String, dynamic>? profile;
   List<MealLog> todayMeals = [];
+  List<ExerciseLog> todayExercises = [];
+  List<ExerciseActivity> exerciseActivities = [];
+  String? exerciseError;
   List<HealthAlert> alerts = [];
   List<DayTotal> last7 = [];
   String? dashboardError;
@@ -86,6 +128,8 @@ class AppState extends ChangeNotifier {
   double? get dailyGoal => toDouble(profile?['daily_calories']);
 
   double get todayCalories => todayMeals.fold(0.0, (sum, m) => sum + (m.calories ?? 0));
+
+  double get todayBurned => todayExercises.fold(0.0, (sum, e) => sum + e.caloriesBurned);
 
   double caloriesForMeal(String mealType) => todayMeals
       .where((m) => m.mealType == mealType)
@@ -161,11 +205,47 @@ class AppState extends ChangeNotifier {
     await refreshDashboard();
   }
 
-  /// มื้อวันนี้ + การแจ้งเตือน
+  /// มื้อวันนี้ + การออกกำลังกาย + การแจ้งเตือน
   Future<void> refreshToday() async {
     final logs = await api.todayLogs();
     todayMeals = logs.map(MealLog.fromJson).toList();
     notifyListeners();
+    await refreshExercises();
+    await refreshDashboard();
+  }
+
+  /// การออกกำลังกายวันนี้ (ถ้า backend ยังไม่มีตาราง exercise_logs จะแสดงข้อความแทน ไม่ทำให้แอปพัง)
+  Future<void> refreshExercises() async {
+    if (isAdmin) return;
+    try {
+      final data = await api.todayExercises();
+      todayExercises = ((data['items'] as List?) ?? [])
+          .map((e) => ExerciseLog.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+      exerciseError = null;
+    } on ApiException catch (e) {
+      exerciseError = e.message;
+    }
+    notifyListeners();
+  }
+
+  Future<List<ExerciseActivity>> loadExerciseActivities() async {
+    if (exerciseActivities.isEmpty) {
+      final data = await api.exerciseActivities();
+      exerciseActivities = data.map(ExerciseActivity.fromJson).toList();
+    }
+    return exerciseActivities;
+  }
+
+  Future<void> addExercise(String activity, int minutes) async {
+    await api.createExercise(activity, minutes);
+    await refreshExercises();
+    await refreshDashboard();
+  }
+
+  Future<void> deleteExercise(int id) async {
+    await api.deleteExercise(id);
+    await refreshExercises();
     await refreshDashboard();
   }
 
@@ -212,6 +292,8 @@ class AppState extends ChangeNotifier {
     user = null;
     profile = null;
     todayMeals = [];
+    todayExercises = [];
+    exerciseError = null;
     alerts = [];
     last7 = [];
     final prefs = await SharedPreferences.getInstance();

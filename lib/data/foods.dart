@@ -22,18 +22,20 @@ String thaiFoodName(String? key) {
 /// น้ำหนักอาหารเริ่มต้นต่อ 1 จาน (กรัม) ใช้ตอนผู้ใช้ยังไม่ได้แก้
 const double kDefaultPlateGrams = 300;
 
+/// มื้อที่ให้เลือก (ตัดของว่างออก เพราะยังไม่มีข้อมูลเมนูของว่าง)
 const Map<String, String> kMealThai = {
   'breakfast': 'มื้อเช้า',
   'lunch': 'มื้อกลางวัน',
   'dinner': 'มื้อเย็น',
-  'snack': 'ของว่าง',
 };
+
+/// ชื่อมื้อสำหรับแสดงผล (บันทึกเก่าที่เป็นของว่างยังแสดงชื่อได้)
+String mealLabel(String type) => kMealThai[type] ?? (type == 'snack' ? 'ของว่าง' : type);
 
 /// เดามื้อจากเวลาตอนนี้
 String mealForNow([DateTime? now]) {
   final h = (now ?? DateTime.now()).hour;
   if (h >= 5 && h < 11) return 'breakfast';
-  if (h >= 11 && h < 15) return 'lunch';
-  if (h >= 17 && h < 21) return 'dinner';
-  return 'snack';
+  if (h >= 11 && h < 16) return 'lunch';
+  return 'dinner';
 }
