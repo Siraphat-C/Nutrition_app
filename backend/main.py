@@ -20,8 +20,15 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field
 from supabase import Client, create_client
 from ultralytics import YOLO
 
-from dashboard import Meal, build_alerts, month_summary
-from nutrition import calculate_daily_requirement
+from dashboard import Meal, build_alerts, month_summary, local_day
+from exercise import ACTIVITIES, MAX_MINUTES, MIN_MINUTES, activity_list, calories_burned
+from nutrition import (
+    KCAL_PER_KG,
+    allowed_goals,
+    calculate_bmi,
+    calculate_daily_requirement,
+    expected_change_per_week,
+)
 from validation import (
     INT4_MAX,
     MAX_IMAGE_PIXELS,
@@ -76,6 +83,7 @@ OPENAPI_TAGS = [
     {"name": "บัญชีผู้ใช้", "description": "สมัครสมาชิก เข้าสู่ระบบ แก้ไขบัญชี ออกจากระบบ"},
     {"name": "ข้อมูลส่วนตัว", "description": "ข้อมูลส่วนตัวและแคลอรี่ที่ควรได้รับต่อวัน"},
     {"name": "อาหาร", "description": "รายการอาหาร วิเคราะห์ภาพ และบันทึกการกิน"},
+    {"name": "ออกกำลังกาย", "description": "บันทึกการออกกำลังกาย คำนวณแคลอรี่ที่เผาผลาญจากค่า MET"},
     {"name": "แอดมิน", "description": "จัดการบัญชีผู้ใช้และข้อมูลอาหาร (เฉพาะแอดมิน)"},
 ]
 
@@ -292,6 +300,14 @@ class WeightLogRequest(BaseModel):
     weight: Weight
 
 
+ActivityKey = Literal[tuple(ACTIVITIES)]
+
+
+class ExerciseLogRequest(BaseModel):
+    activity: ActivityKey                                              # คีย์จาก GET /api/exercise/activities
+    minutes: Annotated[int, Field(ge=MIN_MINUTES, le=MAX_MINUTES)]     # ระยะเวลา (นาที)
+
+
 class FoodRequest(BaseModel):
     food_name: FoodName
     calories_per_100g: Calories
@@ -455,9 +471,61 @@ def admin_only_route(admin_user: dict = Depends(require_admin)):
 PROFILE_INPUT_FIELDS = ("gender", "birth_date", "weight", "height", "activity_level", "goal")
 
 
+GOAL_NAMES_TH = {"lose": "ลดน้ำหนัก", "maintain": "คงน้ำหนัก", "gain": "เพิ่มน้ำหนัก"}
+
+
+def body_info(weight, height, requirement=None) -> dict:
+    """BMI, เป้าหมายที่เลือกได้ และน้ำหนักที่คาดว่าจะเปลี่ยน (ให้แอปปิดปุ่มที่เลือกไม่ได้)
+    requirement = ผลจาก calculate_daily_requirement (ไม่มี = ข้อมูลยังไม่ครบ ไม่คำนวณน้ำหนักที่จะเปลี่ยน)"""
+    info = {"bmi": None, "allowed_goals": list(GOAL_NAMES_TH),
+            "expected_kg_per_week": None, "expected_kg_per_month": None}
+    if weight is not None and height is not None:
+        info["bmi"] = calculate_bmi(float(weight), float(height))
+        info["allowed_goals"] = allowed_goals(float(weight), float(height))
+    if requirement is not None:
+        per_week = expected_change_per_week(requirement.daily_calories, requirement.tdee)
+        info["expected_kg_per_week"] = per_week
+        # คิดรายเดือนจากค่าก่อนปัด จะได้ไม่คลาดจากการปัดรายสัปดาห์
+        per_day = (requirement.daily_calories - requirement.tdee) / KCAL_PER_KG
+        info["expected_kg_per_month"] = round(per_day * 30, 2)
+    return info
+
+
+def requirement_of(profile: dict):
+    """คำนวณเป้าแคลอรี่จากข้อมูลในโปรไฟล์ (ข้อมูลไม่ครบ = None)"""
+    if not all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS):
+        return None
+    return calculate_daily_requirement(
+        gender=profile["gender"],
+        birth_date=date.fromisoformat(str(profile["birth_date"])),
+        weight=float(profile["weight"]),
+        height=float(profile["height"]),
+        activity_level=int(profile["activity_level"]),
+        goal=profile["goal"],
+        today=today_local(),
+    )
+
+
+def check_goal_allowed(weight, height, goal) -> None:
+    if weight is None or height is None or goal is None:
+        return
+    allowed = allowed_goals(float(weight), float(height))
+    if goal not in allowed:
+        bmi = calculate_bmi(float(weight), float(height))
+        choices = " หรือ ".join(GOAL_NAMES_TH[g] for g in allowed)
+        raise HTTPException(
+            status_code=422,
+            detail=f"BMI {bmi:.1f} เลือก{GOAL_NAMES_TH[goal]}ไม่ได้ กรุณาเลือก{choices}",
+        )
+
+
 def with_completeness(profile: dict) -> dict:
-    """เพิ่ม is_complete = กรอกข้อมูลส่วนตัวครบทั้ง 6 ช่องหรือยัง"""
-    return {**profile, "is_complete": all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS)}
+    """เพิ่ม is_complete = กรอกข้อมูลส่วนตัวครบทั้ง 6 ช่องหรือยัง พร้อม BMI และเป้าหมายที่เลือกได้"""
+    return {
+        **profile,
+        "is_complete": all(profile.get(f) is not None for f in PROFILE_INPUT_FIELDS),
+        **body_info(profile.get("weight"), profile.get("height"), requirement_of(profile)),
+    }
 
 
 def get_or_create_profile(user_id: int) -> dict:
@@ -485,6 +553,9 @@ def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_curre
 
     changes = update.model_dump(mode="json", exclude_none=True)
     merged = {**{f: current.get(f) for f in PROFILE_INPUT_FIELDS}, **changes}
+    # เช็กเฉพาะตอนเลือกเป้าหมายใหม่ (บันทึกน้ำหนักอย่างเดียวไม่ถูกบล็อก)
+    if "goal" in changes:
+        check_goal_allowed(merged["weight"], merged["height"], merged["goal"])
 
     if all(merged[f] is not None for f in PROFILE_INPUT_FIELDS):
         requirement = calculate_daily_requirement(
@@ -517,10 +588,11 @@ def _as_float(value) -> float | None:
 @app.post("/api/profile/preview", tags=["ข้อมูลส่วนตัว"])
 def preview_requirement(data: RequirementPreview, current_user: dict = Depends(get_current_user)):
     """คำนวณเป้าหมายให้ดูก่อน ยังไม่บันทึก"""
+    check_goal_allowed(data.weight, data.height, data.goal)
     requirement = calculate_daily_requirement(
         **data.model_dump(), today=today_local()
     )
-    return ok("คำนวณสำเร็จ", requirement.__dict__)
+    return ok("คำนวณสำเร็จ", {**requirement.__dict__, **body_info(data.weight, data.height, requirement)})
 
 
 # ==========================================
@@ -708,6 +780,82 @@ def delete_log(log_id: int = PathParam(gt=0, le=INT4_MAX), current_user: dict = 
 
 
 # ==========================================
+# API 7.2: ออกกำลังกาย (แคลอรี่ที่เผาผลาญ = MET x น้ำหนัก x ชั่วโมง)
+# ==========================================
+EXERCISE_SELECT = "exercise_log_id, activity, met, duration_minutes, weight_kg, calories_burned, logged_at"
+
+
+def fetch_exercises(user_id: int, first_day: date, last_day: date) -> list[dict]:
+    start, end = utc_bounds(first_day, last_day)
+    return supabase.table("exercise_logs").select(EXERCISE_SELECT) \
+        .eq("user_id", user_id) \
+        .gte("logged_at", start) \
+        .lt("logged_at", end) \
+        .order("logged_at") \
+        .execute().data
+
+
+def burned_by_day(rows: list[dict]) -> dict[date, float]:
+    totals: dict[date, float] = {}
+    for r in rows:
+        day = local_day(datetime.fromisoformat(str(r["logged_at"]).replace("Z", "+00:00")), LOCAL_TZ)
+        totals[day] = totals.get(day, 0.0) + float(r["calories_burned"] or 0)
+    return totals
+
+
+def with_activity_name(row: dict) -> dict:
+    activity = ACTIVITIES.get(row["activity"])
+    return {**row, "name_th": activity.name_th if activity else row["activity"]}
+
+
+@app.get("/api/exercise/activities", tags=["ออกกำลังกาย"])
+def list_activities(current_user: dict = Depends(get_current_user)):
+    """กิจกรรมที่เลือกได้ พร้อมค่า MET (2024 Adult Compendium of Physical Activities)"""
+    return ok("ดึงข้อมูลสำเร็จ", activity_list())
+
+
+@app.post("/api/exercise", tags=["ออกกำลังกาย"], status_code=status.HTTP_201_CREATED)
+def create_exercise_log(entry: ExerciseLogRequest, current_user: dict = Depends(get_current_user)):
+    profile = get_or_create_profile(current_user["user_id"])
+    if profile.get("weight") is None:
+        raise HTTPException(status_code=400, detail="กรุณากรอกน้ำหนักตัวในข้อมูลส่วนตัวก่อน")
+    weight = float(profile["weight"])
+    activity = ACTIVITIES[entry.activity]
+    data = {
+        "user_id": current_user["user_id"],
+        "activity": activity.key,
+        "met": activity.met,
+        "duration_minutes": entry.minutes,
+        "weight_kg": weight,
+        "calories_burned": calories_burned(activity.met, weight, entry.minutes),
+    }
+    saved = supabase.table("exercise_logs").insert(data).execute().data[0]
+    return ok("บันทึกการออกกำลังกายสำเร็จ", with_activity_name(saved))
+
+
+@app.get("/api/exercise/today", tags=["ออกกำลังกาย"])
+def get_today_exercises(current_user: dict = Depends(get_current_user)):
+    today = today_local()
+    rows = [with_activity_name(r) for r in fetch_exercises(current_user["user_id"], today, today)]
+    total = round(sum(float(r["calories_burned"] or 0) for r in rows), 2)
+    return ok("ดึงข้อมูลสำเร็จ", {"items": rows, "total_burned": total})
+
+
+@app.delete("/api/exercise/{exercise_log_id}", tags=["ออกกำลังกาย"])
+def delete_exercise(
+    exercise_log_id: int = PathParam(gt=0, le=INT4_MAX),
+    current_user: dict = Depends(get_current_user),
+):
+    result = supabase.table("exercise_logs").delete() \
+        .eq("exercise_log_id", exercise_log_id) \
+        .eq("user_id", current_user["user_id"]) \
+        .execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="ไม่พบรายการออกกำลังกายนี้")
+    return ok("ลบรายการออกกำลังกายสำเร็จ")
+
+
+# ==========================================
 # API 7.1: Dashboard (สรุปรายเดือน, การแจ้งเตือน) และน้ำหนักย้อนหลัง
 # ==========================================
 def requirement_for(profile: dict):
@@ -755,6 +903,12 @@ def dashboard_alerts(current_user: dict = Depends(get_current_user)):
     requirement = requirement_for(profile)
     goal = float(profile["daily_calories"]) if profile.get("daily_calories") is not None else None
     meals = to_meals(fetch_meals(user_id, today - timedelta(days=7), today))
+    try:
+        burned = burned_by_day(fetch_exercises(user_id, today - timedelta(days=7), today))
+    except APIError:
+        # ยังไม่ได้รัน migration 005 (ไม่มีตาราง exercise_logs) ก็ยังแสดงการแจ้งเตือนได้
+        logger.warning("อ่าน exercise_logs ไม่ได้ ตรวจสอบว่ารัน supabase/migrations/005_exercise_logs.sql แล้ว")
+        burned = {}
     weights = [
         (datetime.fromisoformat(str(w["logged_at"]).replace("Z", "+00:00")), float(w["weight"]))
         for w in fetch_weights(user_id, today - timedelta(days=28))
@@ -762,7 +916,7 @@ def dashboard_alerts(current_user: dict = Depends(get_current_user)):
     data = build_alerts(
         meals, weights, goal,
         requirement.bmr if requirement else None,
-        profile.get("gender"), profile.get("goal"), today, LOCAL_TZ,
+        profile.get("gender"), profile.get("goal"), today, LOCAL_TZ, burned,
     )
     return ok("ดึงข้อมูลสำเร็จ", data)
 

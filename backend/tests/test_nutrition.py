@@ -45,3 +45,28 @@ def test_minimum_calories_floor():
 def test_invalid_input(gender, level, goal):
     with pytest.raises(ValueError):
         calculate_daily_requirement(gender, date(2000, 1, 1), 60, 170, level, goal, TODAY)
+
+
+def test_bmi_and_allowed_goals():
+    from nutrition import allowed_goals, calculate_bmi
+    # ตัวอย่างอาจารย์: สูง 160 หนัก 120 -> BMI 46.9 เลือกเพิ่มน้ำหนักไม่ได้
+    assert calculate_bmi(120, 160) == 46.87
+    assert allowed_goals(120, 160) == ["lose"]
+    assert allowed_goals(45, 170) == ["maintain", "gain"]          # BMI 15.6
+    assert allowed_goals(60, 170) == ["lose", "maintain", "gain"]  # BMI 20.8
+    assert allowed_goals(66.47, 170) == ["lose"]                   # BMI 23.0 พอดีเกณฑ์
+
+
+def test_expected_change_per_week():
+    from nutrition import expected_change_per_week
+    assert expected_change_per_week(1500, 2000) == -0.45   # ลด 500 kcal/วัน
+    assert expected_change_per_week(2000, 2000) == 0
+    assert expected_change_per_week(2300, 2000) == 0.27    # เพิ่ม 300 kcal/วัน
+
+
+def test_expected_change_uses_calorie_floor():
+    """เป้าถูกปัดขึ้นเป็นขั้นต่ำ: ส่วนที่ลดได้จริงน้อยกว่า 500 (ชาย 20 ปี 60 กก. 145 ซม. นั่งเป็นหลัก)"""
+    from nutrition import expected_change_per_week
+    r = calculate_daily_requirement("male", date(2006, 1, 17), 60, 145, 1, "lose", TODAY)
+    assert r.daily_calories == 1500                     # TDEE 1,693.5 - 500 = 1,193.5 ต่ำกว่าขั้นต่ำ
+    assert expected_change_per_week(r.daily_calories, r.tdee) == -0.18

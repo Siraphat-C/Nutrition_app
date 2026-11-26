@@ -83,7 +83,7 @@ def test_alert_intake_too_low_is_danger():
 def test_alert_needs_three_days():
     meals = [meal(TODAY - timedelta(days=1), 900)]
     r = build_alerts(meals, [], 1650, 1400, "female", "lose", TODAY, TZ)
-    assert codes(r) == ["need_more_logs"]
+    assert codes(r) == []   # ยังไม่ถึง 3 วัน ไม่เตือนอะไร
 
 
 def test_alert_today_over_goal():
@@ -114,3 +114,34 @@ def test_weight_rate_needs_span():
 
 def test_no_goal_asks_for_profile():
     assert codes(build_alerts([], [], None, None, None, None, TODAY, TZ)) == ["need_profile"]
+
+
+def test_exercise_is_subtracted_from_goal_comparison():
+    # กิน 2,100 ต่อวัน (เกินเป้า 1,650 เกิน 10%) แต่ออกกำลังกายวันละ 400 -> สุทธิ 1,700 = พอดี
+    days = [TODAY - timedelta(days=i) for i in range(1, 8)]
+    meals = [meal(d, 2100) for d in days]
+    burned = {d: 400 for d in days}
+    with_ex = build_alerts(meals, [], 1650, 1400, "female", "lose", TODAY, TZ, burned)
+    without = build_alerts(meals, [], 1650, 1400, "female", "lose", TODAY, TZ)
+    assert "intake_over_goal" in codes(without)
+    assert "intake_over_goal" not in codes(with_ex)
+    assert "on_track" in codes(with_ex)
+    day = with_ex["last7"][-2]
+    assert (day["eaten"], day["burned"], day["calories"]) == (2100, 400, 1700)
+
+
+def test_intake_too_low_uses_food_eaten_not_net():
+    # กินวันละ 1,300 (สูงกว่าขั้นต่ำ 1,200) ออกกำลังกาย 500 -> สุทธิ 800 แต่ไม่ถือว่ากินน้อยเกินไป
+    days = [TODAY - timedelta(days=i) for i in range(1, 8)]
+    meals = [meal(d, 1300) for d in days]
+    burned = {d: 500 for d in days}
+    result = build_alerts(meals, [], 1650, 1100, "female", "lose", TODAY, TZ, burned)
+    assert "intake_too_low" not in codes(result)
+
+
+def test_today_over_goal_after_exercise():
+    meals = [meal(TODAY, 2000)]
+    assert "today_over_goal" in codes(build_alerts(meals, [], 1650, 1400, "male", "lose", TODAY, TZ))
+    result = build_alerts(meals, [], 1650, 1400, "male", "lose", TODAY, TZ, {TODAY: 500})
+    assert "today_over_goal" not in codes(result)
+    assert result["last7"][-1]["calories"] == 1500

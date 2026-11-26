@@ -4,8 +4,11 @@
 เกณฑ์และที่มา
 - ลดน้ำหนักไม่ควรเกิน 1 กก./สัปดาห์ และไม่ควรกินต่ำกว่า BMR:
   เครื่องมือวางแผนลดน้ำหนัก Nutrition ai+ สำนักโภชนาการ กรมอนามัย
+  (สอดคล้องกับ CDC: ลด 0.5-1 กก. (1-2 ปอนด์)/สัปดาห์ มีโอกาสรักษาน้ำหนักได้ระยะยาว)
 - 7,700 kcal = น้ำหนัก 1 กก.: ใช้ในเครื่องมือเดียวกัน
-- ขั้นต่ำ 1,200 kcal (หญิง) / 1,500 kcal (ชาย): ใช้ค่าเดียวกับ nutrition.MIN_CALORIES
+- ขั้นต่ำ 1,200 kcal (หญิง) / 1,500 kcal (ชาย): 2013 AHA/ACC/TOS Obesity Guideline (nutrition.MIN_CALORIES)
+- แคลอรี่สุทธิ = กิน - เผาผลาญจากการออกกำลังกาย (exercise.py) ใช้เทียบกับเป้า
+  ส่วนเกณฑ์ "กินน้อยเกินไป" ใช้แคลอรี่ที่กินจริง ไม่หักการออกกำลังกาย
 - ทีมกำหนดเอง (รออาจารย์ยืนยัน): กินเกินเป้าเกิน 10%, น้ำหนักขึ้นเกิน 0.5 กก./สัปดาห์,
   ช่วง "พอดี" = เป้า ±10%
 """
@@ -17,9 +20,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 
-from nutrition import MIN_CALORIES
+from nutrition import KCAL_PER_KG, MIN_CALORIES
 
-KCAL_PER_KG = 7700
 MAX_SAFE_LOSS_KG_PER_WEEK = 1.0
 FAST_GAIN_KG_PER_WEEK = 0.5     # ทีมกำหนด
 ON_TARGET_BAND = 0.10           # ทีมกำหนด: เป้า ±10% ถือว่าพอดี
@@ -130,17 +132,32 @@ def weight_rate_per_week(weights: list[tuple[datetime, float]], today: date, tz:
 
 def build_alerts(meals: list[Meal], weights: list[tuple[datetime, float]], goal: float | None,
                  bmr: float | None, gender: str | None, goal_type: str | None,
-                 today: date, tz: tzinfo) -> dict:
-    """การ์ดเตือน + แคลอรี่ 7 วันล่าสุด (6 วันก่อน + วันนี้)"""
-    per_day = totals_by_day(meals, tz)
-    past_days = [today - timedelta(days=i) for i in range(6, 0, -1)]
-    last7 = [{"date": d.isoformat(), "calories": round(per_day.get(d, 0.0), 2)} for d in past_days]
-    today_total = per_day.get(today, 0.0)
-    last7.append({"date": today.isoformat(), "calories": round(today_total, 2)})
+                 today: date, tz: tzinfo,
+                 burned_by_day: dict[date, float] | None = None) -> dict:
+    """การ์ดเตือน + แคลอรี่ 7 วันล่าสุด (6 วันก่อน + วันนี้)
+    burned_by_day = แคลอรี่ที่เผาผลาญจากการออกกำลังกายแต่ละวัน (วันตามเวลาไทย)
+    last7: calories = สุทธิ (กิน - เผาผลาญ), eaten = กิน, burned = เผาผลาญ"""
+    eaten = totals_by_day(meals, tz)
+    burned = burned_by_day or {}
+    days_with_data = set(eaten) | {d for d, b in burned.items() if b}
+    per_day = {d: eaten.get(d, 0.0) - burned.get(d, 0.0) for d in days_with_data}  # สุทธิ
 
-    # วันที่บันทึกใน 7 วันก่อนหน้า (ไม่รวมวันนี้ที่ยังไม่จบ)
+    def day_entry(d: date) -> dict:
+        return {
+            "date": d.isoformat(),
+            "calories": round(per_day.get(d, 0.0), 2),
+            "eaten": round(eaten.get(d, 0.0), 2),
+            "burned": round(burned.get(d, 0.0), 2),
+        }
+
+    last7 = [day_entry(today - timedelta(days=i)) for i in range(6, -1, -1)]
+    today_total = per_day.get(today, 0.0)
+
+    # วันที่บันทึกอาหารใน 7 วันก่อนหน้า (ไม่รวมวันนี้ที่ยังไม่จบ)
     window = [today - timedelta(days=i) for i in range(7, 0, -1)]
-    logged = [per_day[d] for d in window if d in per_day]
+    logged_days = [d for d in window if d in eaten]
+    logged = [per_day[d] for d in logged_days]            # สุทธิ ใช้เทียบเป้า
+    logged_eaten = [eaten[d] for d in logged_days]        # กินจริง ใช้เช็กกินน้อยเกินไป
     alerts: list[dict] = []
 
     if not goal:
@@ -151,12 +168,13 @@ def build_alerts(meals: list[Meal], weights: list[tuple[datetime, float]], goal:
     floor = max(bmr or 0, MIN_CALORIES.get(gender or "", 0))
     if len(logged) >= MIN_DAYS_FOR_ANALYSIS:
         avg = sum(logged) / len(logged)
+        avg_eaten = sum(logged_eaten) / len(logged_eaten)
         over_days = sum(1 for c in logged if classify_day(c, goal) == "over")
         on_days = sum(1 for c in logged if classify_day(c, goal) == "on_target")
-        if floor and avg < floor:
+        if floor and avg_eaten < floor:
             alerts.append(_alert(
                 "danger", "intake_too_low",
-                f"7 วันที่ผ่านมากินเฉลี่ยเพียง {avg:,.0f} kcal/วัน",
+                f"7 วันที่ผ่านมากินเฉลี่ยเพียง {avg_eaten:,.0f} kcal/วัน",
                 f"ต่ำกว่าระดับที่ปลอดภัย ({floor:,.0f} kcal) อาจทำให้ระบบเผาผลาญลดลงและขาดสารอาหาร "
                 "ถ้าบันทึกไม่ครบทุกมื้อ ตัวเลขนี้อาจต่ำกว่าความจริง",
             ))
@@ -172,14 +190,14 @@ def build_alerts(meals: list[Meal], weights: list[tuple[datetime, float]], goal:
         elif on_days >= 5:
             alerts.append(_alert("good", "on_track", f"กินตามเป้า {on_days} จาก {len(logged)} วัน",
                                  "ทำต่อแบบนี้ได้เลย"))
-    else:
-        alerts.append(_alert("info", "need_more_logs", "บันทึกอาหารให้ครบอย่างน้อย 3 วัน",
-                             "ระบบจะเริ่มวิเคราะห์การกินย้อนหลังให้"))
+    # บันทึกไม่ถึง 3 วัน: ยังไม่วิเคราะห์ย้อนหลัง และไม่แสดงการ์ดแนะนำ
 
     if today_total > goal:
+        hint = "มื้อถัดไปเลือกเมนูเบาๆ หรือข้ามของว่าง"
+        if burned.get(today):
+            hint = f"หักการออกกำลังกาย {burned[today]:,.0f} kcal แล้ว " + hint
         alerts.append(_alert("warning", "today_over_goal",
-                             f"วันนี้กินเกินเป้าแล้ว {today_total - goal:,.0f} kcal",
-                             "มื้อถัดไปเลือกเมนูเบาๆ หรือข้ามของว่าง"))
+                             f"วันนี้กินเกินเป้าแล้ว {today_total - goal:,.0f} kcal", hint))
 
     rate = weight_rate_per_week(weights, today, tz)
     if rate is not None:
