@@ -29,7 +29,7 @@ class MealLog {
       logId: (row['log_id'] as num).toInt(),
       mealType: (row['meal_type'] ?? 'snack') as String,
       loggedAt: DateTime.tryParse('${row['logged_at']}')?.toLocal() ?? DateTime.now(),
-      foodName: thaiFoodName(food['food_name'] as String?),
+      foodName: thaiFoodName(food['food_name'] as String?, food['food_name_th']),
       grams: toDouble(row['estimated_weight']) ?? kDefaultPlateGrams,
       calories: (per100 == null || per100 <= 0) ? null : toDouble(row['total_calories']),
     );

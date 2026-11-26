@@ -1,4 +1,5 @@
-/// ชื่อภาษาไทยของ 12 เมนูที่โมเดลรู้จัก (คีย์ตรงกับ food_name ในฐานข้อมูล)
+/// ชื่อไทยสำรองของ 12 เมนูแรก ใช้เฉพาะตอนฐานข้อมูลยังไม่มี food_name_th (ยังไม่ได้รัน migration 006)
+/// เมนูใหม่ให้แอดมินใส่ชื่อไทยในหน้าแอดมิน ไม่ต้องแก้ไฟล์นี้
 const Map<String, String> kFoodThaiNames = {
   'khao_kha_moo': 'ข้าวขาหมู',
   'khao_man_kai': 'ข้าวมันไก่',
@@ -14,7 +15,10 @@ const Map<String, String> kFoodThaiNames = {
   'pad_kra_pao_moo_krob': 'ข้าวกะเพราหมูกรอบ',
 };
 
-String thaiFoodName(String? key) {
+/// ชื่อเมนูสำหรับแสดงผล: ชื่อไทยจากฐานข้อมูล (food_name_th) ถ้ามี
+String thaiFoodName(String? key, [Object? nameTh]) {
+  final th = nameTh is String ? nameTh.trim() : '';
+  if (th.isNotEmpty) return th;
   if (key == null) return 'ไม่ทราบเมนู';
   return kFoodThaiNames[key] ?? key;
 }

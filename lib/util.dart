@@ -28,6 +28,19 @@ String fmtThaiDate(DateTime d) =>
 
 String fmtThaiShortDate(DateTime d) => '${d.day} ${_thaiMonths[d.month - 1]} ${d.year + 543}';
 
+/// น้ำหนักแบบตัด .0 ทิ้ง: 82.0 -> "82", 82.5 -> "82.5"
+String fmtKg(double kg) => kg == kg.roundToDouble() ? kg.toStringAsFixed(0) : kg.toStringAsFixed(1);
+
+/// "55 กก. ภายใน 12 ก.พ. 2570" จาก target_weight / target_days_left ของโปรไฟล์ (ไม่ได้ตั้ง = null)
+String? targetText(Map<String, dynamic> profile) {
+  if (profile['target_active'] != true) return null;
+  final kg = (profile['target_weight'] as num?)?.toDouble();
+  final days = (profile['target_days_left'] as num?)?.toInt();
+  if (kg == null || days == null) return null;
+  final end = DateTime.now().add(Duration(days: days));
+  return '${fmtKg(kg)} กก. ภายใน ${fmtThaiShortDate(end)}';
+}
+
 /// เกณฑ์ BMI คนเอเชีย/คนไทย
 ({String label, Color color}) bmiCategory(double bmi) {
   if (bmi < 18.5) return (label: 'น้ำหนักน้อยเกินไป', color: kBlue);

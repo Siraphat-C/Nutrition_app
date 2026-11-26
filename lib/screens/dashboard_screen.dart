@@ -30,8 +30,9 @@ class DashboardScreen extends StatelessWidget {
         final goal = app.dailyGoal ?? 0;
         final eaten = app.todayCalories;
         final burned = app.todayBurned;
-        final net = eaten - burned; // หักแคลอรี่ที่เผาผลาญจากการออกกำลังกาย
-        final left = goal - net;
+        // ออกกำลังกายแล้วกินได้เพิ่มตามที่เผาผลาญ (เป้าวันนี้ = เป้า + เผาผลาญ)
+        final budget = goal + burned;
+        final left = budget - eaten;
         final now = DateTime.now();
         return RefreshIndicator(
           color: kGreenDark,
@@ -51,8 +52,6 @@ class DashboardScreen extends StatelessWidget {
               _TodayCard(goal: goal, eaten: eaten, burned: burned, left: left, app: app),
               const SizedBox(height: 14),
               _Alerts(app: app),
-              const SizedBox(height: 14),
-              _NextMealCard(left: left, onScan: onScan),
               const SizedBox(height: 14),
               ExerciseCard(app: app),
               const SizedBox(height: 14),
@@ -84,6 +83,7 @@ class _Header extends StatelessWidget {
       'gain' => 'เป้าหมาย: เพิ่มน้ำหนัก',
       _ => 'เป้าหมาย: รักษาน้ำหนัก',
     };
+    final target = targetText(AppState.instance.profile ?? const {});
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -94,7 +94,8 @@ class _Header extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: kInk)),
         const SizedBox(height: 2),
-        Text(goalText, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: kGreenText)),
+        Text(target == null ? goalText : '$goalText · $target',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: kGreenText)),
       ],
     );
   }
@@ -116,8 +117,7 @@ class _TodayCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final net = eaten - burned;
-    final pct = goal <= 0 ? 0 : (net / goal * 100).round();
+    final budget = goal + burned;
     final over = left < 0;
     return AppCard(
       padding: const EdgeInsets.all(24),
@@ -125,13 +125,13 @@ class _TodayCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              CalorieRing(eaten: net < 0 ? 0.0 : net, goal: goal, size: 156),
+              CalorieRing(eaten: eaten, goal: budget, size: 156),
               const SizedBox(width: 20),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(over ? 'เกินเป้าวันนี้' : 'เหลือสำหรับวันนี้',
+                    Text(over ? 'กินเกินไปแล้ว' : 'เหลือกินได้อีก',
                         style: const TextStyle(fontSize: 15, color: kMuted)),
                     FittedBox(
                       fit: BoxFit.scaleDown,
@@ -140,12 +140,20 @@ class _TodayCard extends StatelessWidget {
                           style: TextStyle(
                               fontSize: 34, fontWeight: FontWeight.w800, color: over ? kOrangeText : kGreenText)),
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      burned > 0
-                          ? 'กิน ${fmtInt(eaten)} − ออกกำลังกาย ${fmtInt(burned)} = ${fmtInt(net)} kcal ($pct% ของเป้า)'
-                          : 'กินไปแล้ว $pct% ของเป้า',
-                      style: const TextStyle(fontSize: 14, color: Color(0xFF475569), height: 1.5),
+                    const SizedBox(height: 8),
+                    // สูตรแบบอ่านง่าย: เป้า + ออกกำลังกาย − กินไปแล้ว = เหลือ
+                    // ทุกบรรทัดอยู่บรรทัดเดียว จอแคบจะย่อตัวอักษรทั้งกลุ่มเท่ากันแทนการตัดบรรทัด
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _SumRow('เป้าวันนี้', fmtInt(goal)),
+                          if (burned > 0) _SumRow('+ ออกกำลังกาย', fmtInt(burned)),
+                          _SumRow('− กินไปแล้ว', fmtInt(eaten)),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -153,9 +161,35 @@ class _TodayCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 20),
-          _MealBar(goal: goal, app: app),
+          _MealBar(goal: budget, app: app),
         ],
       ),
+    );
+  }
+}
+
+class _SumRow extends StatelessWidget {
+  final String label;
+  final String value;
+  const _SumRow(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) {
+    const style = TextStyle(fontSize: 14, color: Color(0xFF475569), height: 1.5);
+    // ความกว้างคงที่ทุกบรรทัด ตัวเลขชิดขวาตรงกัน (FittedBox ด้านนอกย่อทั้งกลุ่มเมื่อจอแคบ)
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(width: 118, child: Text(label, maxLines: 1, softWrap: false, style: style)),
+        SizedBox(
+          width: 64,
+          child: Text(value,
+              maxLines: 1,
+              softWrap: false,
+              textAlign: TextAlign.right,
+              style: style.copyWith(fontWeight: FontWeight.w600)),
+        ),
+      ],
     );
   }
 }
@@ -225,82 +259,6 @@ class _Alerts extends StatelessWidget {
           cards[i],
         ],
       ],
-    );
-  }
-}
-
-class _NextMealCard extends StatelessWidget {
-  final double left;
-  final VoidCallback onScan;
-  const _NextMealCard({required this.left, required this.onScan});
-
-  @override
-  Widget build(BuildContext context) {
-    final meal = mealForNow();
-    // ประมาณแคลต่อจานจาก kcal/100g x 300 กรัม (ค่าจริงจะมาจาก /api/foods)
-    const suggestions = [
-      ('ข้าวหน้าเป็ด', 387.0),
-      ('ข้าวหมูกระเทียม', 423.0),
-      ('ข้าวหมูทอด', 432.0),
-      ('ข้าวหมูแดง', 462.0),
-      ('ข้าวขาหมู', 483.0),
-      ('ข้าวผัดหมู', 530.0),
-      ('ข้าวมันไก่', 594.0),
-    ];
-    final fits = suggestions.where((s) => s.$2 <= left).take(3).toList();
-    return AppCard(
-      color: kGreenDark,
-      padding: const EdgeInsets.all(14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('มื้อถัดไป · ${kMealThai[meal]}', style: const TextStyle(fontSize: 13, color: Colors.white)),
-          const SizedBox(height: 2),
-          Text(
-            left > 0 ? 'กินได้อีกไม่เกิน ${fmtInt(left)} kcal' : 'วันนี้ครบเป้าแล้ว',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white),
-          ),
-          const SizedBox(height: 8),
-          if (fits.isEmpty)
-            const Text('ถ้ายังหิว เลือกผลไม้หรือน้ำเปล่าแทนอาหารจานหลัก',
-                style: TextStyle(fontSize: 14, color: Colors.white, height: 1.5))
-          else
-            for (final s in fits) ...[
-              Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text('${s.$1} 1 จาน',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
-                    ),
-                    Text('${fmtInt(s.$2)} kcal', style: const TextStyle(fontSize: 13, color: Colors.white)),
-                  ],
-                ),
-              ),
-            ],
-          const SizedBox(height: 4),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white54),
-                minimumSize: const Size.fromHeight(38),
-                visualDensity: VisualDensity.compact,
-              ),
-              onPressed: onScan,
-              icon: const Icon(Icons.photo_camera_outlined),
-              label: const Text('สแกนมื้อนี้'),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -383,14 +341,181 @@ class _BodyCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          if (_TargetProgress.of(app.profile) != null) ...[
+            const Divider(height: 24, color: Color(0xFFF1F5F9)),
+            _TargetProgress.of(app.profile)!,
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => _updateWeight(context, weight),
+              icon: const Icon(Icons.monitor_weight_outlined),
+              label: const Text('อัปเดตน้ำหนัก'),
+            ),
+          ),
+          const SizedBox(height: 6),
           const Align(
             alignment: Alignment.centerLeft,
-            child: Text('น้ำหนักอัปเดตจากหน้าโปรไฟล์ ใช้วาดกราฟและแจ้งเตือนน้ำหนักลด/ขึ้นเร็ว',
+            child: Text('ใช้วาดกราฟ แจ้งเตือนน้ำหนักลด/ขึ้นเร็ว และคำนวณความคืบหน้าสู่เป้าหมาย',
                 style: TextStyle(fontSize: 12, color: kMuted)),
           ),
         ],
       ),
+    );
+  }
+
+  /// อัปเดตน้ำหนักอย่างเดียว (ส่งแค่ weight: เป้าหมายและวันครบกำหนดเดิมไม่เปลี่ยน)
+  Future<void> _updateWeight(BuildContext context, double? current) async {
+    final saved = await showDialog<bool>(context: context, builder: (_) => _WeightDialog(current: current));
+    if (saved == true && context.mounted) showSnack(context, 'อัปเดตน้ำหนักแล้ว');
+  }
+}
+
+class _WeightDialog extends StatefulWidget {
+  final double? current;
+  const _WeightDialog({this.current});
+
+  @override
+  State<_WeightDialog> createState() => _WeightDialogState();
+}
+
+class _WeightDialogState extends State<_WeightDialog> {
+  late final _ctrl = TextEditingController(text: widget.current == null ? '' : fmtKg(widget.current!));
+  String? _error;
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final w = double.tryParse(_ctrl.text.trim());
+    if (w == null || w < 20 || w > 300) {
+      setState(() => _error = 'น้ำหนักต้องอยู่ระหว่าง 20–300 กก.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppState.instance.saveProfile({'weight': w});
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('อัปเดตน้ำหนัก'),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: InputDecoration(labelText: 'น้ำหนักวันนี้', suffixText: 'กก.', errorText: _error),
+        onSubmitted: (_) => _busy ? null : _save(),
+      ),
+      actions: [
+        TextButton(onPressed: _busy ? null : () => Navigator.pop(context, false), child: const Text('ยกเลิก')),
+        FilledButton(onPressed: _busy ? null : _save, child: const Text('บันทึก')),
+      ],
+    );
+  }
+}
+
+/// ความคืบหน้าสู่น้ำหนักเป้าหมาย: เริ่ม → ตอนนี้ → เป้า และช้า/เร็วกว่าแผน (จาก target_progress ของ backend)
+class _TargetProgress extends StatelessWidget {
+  final double start;
+  final double now;
+  final double target;
+  final double done;
+  final double remaining;
+  final int percent;
+  final double behind;
+  final bool reached;
+  final int daysLeft;
+  const _TargetProgress({
+    required this.start,
+    required this.now,
+    required this.target,
+    required this.done,
+    required this.remaining,
+    required this.percent,
+    required this.behind,
+    required this.reached,
+    required this.daysLeft,
+  });
+
+  static _TargetProgress? of(Map<String, dynamic>? profile) {
+    final p = profile?['target_progress'];
+    final target = (profile?['target_weight'] as num?)?.toDouble();
+    final now = (profile?['weight'] as num?)?.toDouble();
+    final days = (profile?['target_days_left'] as num?)?.toInt();
+    if (p is! Map || target == null || now == null || days == null) return null;
+    return _TargetProgress(
+      start: (p['start_weight'] as num).toDouble(),
+      now: now,
+      target: target,
+      done: (p['done_kg'] as num).toDouble(),
+      remaining: (p['remaining_kg'] as num).toDouble(),
+      percent: (p['percent'] as num).toInt(),
+      behind: (p['behind_kg'] as num).toDouble(),
+      reached: p['reached'] == true,
+      daysLeft: days,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final verb = target < start ? 'ลด' : 'เพิ่ม';
+    final (String status, Color color) = reached
+        ? ('ถึงน้ำหนักเป้าหมายแล้ว', kGreenText)
+        : done < 0
+            ? ('น้ำหนัก${verb == 'ลด' ? 'ขึ้น' : 'ลง'}สวนทางเป้า ${fmtKg(-done)} กก.', kRedText)
+            : behind >= 0.5
+                ? ('ช้ากว่าแผน ${fmtKg(behind)} กก. ลองกินให้ตรงเป้าแคลอรี่', kOrangeText)
+                : behind <= -0.5
+                    ? ('เร็วกว่าแผน ${fmtKg(-behind)} กก.', kGreenText)
+                    : ('เป็นไปตามแผน', kGreenText);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text('เป้าหมาย ${fmtKg(target)} กก.',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: kInk)),
+            ),
+            Text(daysLeft > 0 ? 'อีก $daysLeft วัน' : 'ครบกำหนดแล้ว',
+                style: const TextStyle(fontSize: 13, color: kMuted)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: LinearProgressIndicator(
+            value: percent / 100,
+            minHeight: 10,
+            backgroundColor: const Color(0xFFEEF2F6),
+            color: kGreen,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text('$verbไปแล้ว ${fmtKg(done <= 0 ? 0.0 : done)} กก. ($percent%) · เหลืออีก ${fmtKg(remaining)} กก.',
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: kInk)),
+        const SizedBox(height: 2),
+        Text('เริ่ม ${fmtKg(start)} → ตอนนี้ ${fmtKg(now)} → เป้า ${fmtKg(target)} กก.',
+            style: const TextStyle(fontSize: 13, color: kMuted)),
+        const SizedBox(height: 2),
+        Text(status, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+      ],
     );
   }
 }

@@ -1,10 +1,32 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:nutrition_app/data/foods.dart';
 import 'package:nutrition_app/main.dart';
 import 'package:nutrition_app/util.dart';
 
 void main() {
+  test('thaiFoodName ใช้ชื่อไทยจากฐานข้อมูลก่อน', () {
+    expect(thaiFoodName('khao_pad_kai', 'ข้าวผัดไก่'), 'ข้าวผัดไก่');
+    expect(thaiFoodName('khao_man_kai'), 'ข้าวมันไก่'); // ชื่อสำรองตอนยังไม่มี food_name_th
+    expect(thaiFoodName('khao_pad_kai', '  '), 'khao_pad_kai');
+    expect(thaiFoodName(null), 'ไม่ทราบเมนู');
+  });
+
+  test('targetText แสดงน้ำหนักเป้าหมายเฉพาะตอนยังใช้อยู่', () {
+    expect(targetText({'target_active': true, 'target_weight': 55, 'target_days_left': 0}),
+        startsWith('55 กก. ภายใน '));
+    expect(targetText({'target_active': true, 'target_weight': 55.5, 'target_days_left': 7}),
+        startsWith('55.5 กก. ภายใน '));
+    expect(targetText({'target_active': false, 'target_weight': 55, 'target_days_left': 7}), isNull);
+    expect(targetText({}), isNull);
+  });
+
+  test('fmtKg ตัด .0 ทิ้ง', () {
+    expect(fmtKg(82.0), '82');
+    expect(fmtKg(82.5), '82.5');
+  });
+
   test('fmtInt ใส่จุลภาคหลักพัน', () {
     expect(fmtInt(1234.4), '1,234');
     expect(fmtInt(999), '999');
