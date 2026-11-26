@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../util.dart';
 import '../widgets/common.dart';
 import 'auth_screens.dart';
+import 'exercise_sheet.dart';
 
 /// สีของแต่ละมื้อ ใช้ร่วมกันหลายหน้า
 const Map<String, Color> kMealColors = {
@@ -28,7 +29,9 @@ class DashboardScreen extends StatelessWidget {
       builder: (context, _) {
         final goal = app.dailyGoal ?? 0;
         final eaten = app.todayCalories;
-        final left = goal - eaten;
+        final burned = app.todayBurned;
+        final net = eaten - burned; // หักแคลอรี่ที่เผาผลาญจากการออกกำลังกาย
+        final left = goal - net;
         final now = DateTime.now();
         return RefreshIndicator(
           color: kGreenDark,
@@ -45,11 +48,13 @@ class DashboardScreen extends StatelessWidget {
             children: [
               _Header(name: app.username, date: fmtThaiDate(now), goal: app.profile?['goal'] as String?),
               const SizedBox(height: 14),
-              _TodayCard(goal: goal, eaten: eaten, left: left, app: app),
+              _TodayCard(goal: goal, eaten: eaten, burned: burned, left: left, app: app),
               const SizedBox(height: 14),
               _Alerts(app: app),
               const SizedBox(height: 14),
               _NextMealCard(left: left, onScan: onScan),
+              const SizedBox(height: 14),
+              ExerciseCard(app: app),
               const SizedBox(height: 14),
               _Last7Days(goal: goal, days: app.last7),
               const SizedBox(height: 14),
@@ -98,44 +103,56 @@ class _Header extends StatelessWidget {
 class _TodayCard extends StatelessWidget {
   final double goal;
   final double eaten;
+  final double burned;
   final double left;
   final AppState app;
-  const _TodayCard({required this.goal, required this.eaten, required this.left, required this.app});
+  const _TodayCard({
+    required this.goal,
+    required this.eaten,
+    required this.burned,
+    required this.left,
+    required this.app,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final pct = goal <= 0 ? 0 : (eaten / goal * 100).round();
+    final net = eaten - burned;
+    final pct = goal <= 0 ? 0 : (net / goal * 100).round();
     final over = left < 0;
     return AppCard(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(24),
       child: Column(
         children: [
           Row(
             children: [
-              CalorieRing(eaten: eaten, goal: goal),
-              const SizedBox(width: 18),
+              CalorieRing(eaten: net < 0 ? 0.0 : net, goal: goal, size: 156),
+              const SizedBox(width: 20),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(over ? 'เกินเป้าวันนี้' : 'เหลือสำหรับวันนี้',
-                        style: const TextStyle(fontSize: 13, color: kMuted)),
+                        style: const TextStyle(fontSize: 15, color: kMuted)),
                     FittedBox(
                       fit: BoxFit.scaleDown,
                       alignment: Alignment.centerLeft,
                       child: Text('${fmtInt(left.abs())} kcal',
                           style: TextStyle(
-                              fontSize: 28, fontWeight: FontWeight.w800, color: over ? kOrangeText : kGreenText)),
+                              fontSize: 34, fontWeight: FontWeight.w800, color: over ? kOrangeText : kGreenText)),
                     ),
                     const SizedBox(height: 6),
-                    Text('กินไปแล้ว $pct% ของเป้า',
-                        style: const TextStyle(fontSize: 13, color: Color(0xFF475569), height: 1.5)),
+                    Text(
+                      burned > 0
+                          ? 'กิน ${fmtInt(eaten)} − ออกกำลังกาย ${fmtInt(burned)} = ${fmtInt(net)} kcal ($pct% ของเป้า)'
+                          : 'กินไปแล้ว $pct% ของเป้า',
+                      style: const TextStyle(fontSize: 14, color: Color(0xFF475569), height: 1.5),
+                    ),
                   ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
           _MealBar(goal: goal, app: app),
         ],
       ),
@@ -161,7 +178,7 @@ class _MealBar extends StatelessWidget {
         ClipRRect(
           borderRadius: BorderRadius.circular(6),
           child: SizedBox(
-            height: 10,
+            height: 12,
             child: Row(
               children: [
                 for (final p in parts)
@@ -233,6 +250,7 @@ class _NextMealCard extends StatelessWidget {
     final fits = suggestions.where((s) => s.$2 <= left).take(3).toList();
     return AppCard(
       color: kGreenDark,
+      padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -240,17 +258,17 @@ class _NextMealCard extends StatelessWidget {
           const SizedBox(height: 2),
           Text(
             left > 0 ? 'กินได้อีกไม่เกิน ${fmtInt(left)} kcal' : 'วันนี้ครบเป้าแล้ว',
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.white),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           if (fits.isEmpty)
             const Text('ถ้ายังหิว เลือกผลไม้หรือน้ำเปล่าแทนอาหารจานหลัก',
                 style: TextStyle(fontSize: 14, color: Colors.white, height: 1.5))
           else
             for (final s in fits) ...[
               Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(14),
@@ -259,9 +277,9 @@ class _NextMealCard extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text('${s.$1} 1 จาน',
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
                     ),
-                    Text('~${fmtInt(s.$2)} kcal', style: const TextStyle(fontSize: 14, color: Colors.white)),
+                    Text('${fmtInt(s.$2)} kcal', style: const TextStyle(fontSize: 13, color: Colors.white)),
                   ],
                 ),
               ),
@@ -273,6 +291,8 @@ class _NextMealCard extends StatelessWidget {
               style: OutlinedButton.styleFrom(
                 foregroundColor: Colors.white,
                 side: const BorderSide(color: Colors.white54),
+                minimumSize: const Size.fromHeight(38),
+                visualDensity: VisualDensity.compact,
               ),
               onPressed: onScan,
               icon: const Icon(Icons.photo_camera_outlined),
@@ -310,7 +330,7 @@ class _Last7Days extends StatelessWidget {
           Text(
             past.isEmpty
                 ? 'ยังไม่มีบันทึกย้อนหลัง'
-                : 'เฉลี่ย ${fmtInt(avg)} kcal/วัน (เฉพาะวันที่บันทึก ไม่รวมวันนี้)',
+                : 'เฉลี่ย ${fmtInt(avg)} kcal/วัน หักออกกำลังกายแล้ว (เฉพาะวันที่บันทึก ไม่รวมวันนี้)',
             style: const TextStyle(fontSize: 12, color: kMuted),
           ),
           const SizedBox(height: 14),
@@ -426,7 +446,7 @@ class _MealRow extends StatelessWidget {
       context: context,
       builder: (c) => AlertDialog(
         title: const Text('ลบมื้อนี้?'),
-        content: Text('${meal.foodName} (${kMealThai[meal.mealType] ?? meal.mealType} ${fmtTime(meal.loggedAt)})'),
+        content: Text('${meal.foodName} (${mealLabel(meal.mealType)} ${fmtTime(meal.loggedAt)})'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('ยกเลิก')),
           FilledButton(
@@ -468,7 +488,7 @@ class _MealRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: kInk)),
-              Text('${kMealThai[meal.mealType] ?? meal.mealType} · ${fmtInt(meal.grams)} กรัม',
+              Text('${mealLabel(meal.mealType)} · ${fmtInt(meal.grams)} กรัม',
                   style: const TextStyle(fontSize: 12, color: kMuted)),
             ],
           ),

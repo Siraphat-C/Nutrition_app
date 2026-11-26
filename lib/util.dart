@@ -30,11 +30,20 @@ String fmtThaiShortDate(DateTime d) => '${d.day} ${_thaiMonths[d.month - 1]} ${d
 
 /// เกณฑ์ BMI คนเอเชีย/คนไทย
 ({String label, Color color}) bmiCategory(double bmi) {
-  if (bmi < 18.5) return (label: 'ผอม', color: kBlue);
-  if (bmi < 23) return (label: 'ปกติ', color: kGreenText);
-  if (bmi < 25) return (label: 'ท้วม', color: kOrangeText);
-  if (bmi < 30) return (label: 'อ้วนระดับ 1', color: kRedText);
-  return (label: 'อ้วนระดับ 2', color: kRedText);
+  if (bmi < 18.5) return (label: 'น้ำหนักน้อยเกินไป', color: kBlue);
+  if (bmi < 23) return (label: 'น้ำหนักปกติ', color: kGreenText);
+  if (bmi < 25) return (label: 'น้ำหนักเกินเล็กน้อย', color: kOrangeText);
+  if (bmi < 30) return (label: 'อ้วน', color: kRedText);
+  return (label: 'อ้วนมาก', color: kRedText);
+}
+
+/// เป้าหมายที่เลือกได้ตาม BMI (ตรงกับ nutrition.allowed_goals ใน backend)
+/// ผอม (< 18.5) ลดน้ำหนักไม่ได้, น้ำหนักเกินเกณฑ์เอเชีย (>= 23) เลือกได้แค่ลดน้ำหนัก
+List<String> allowedGoalsForBmi(double? bmi) {
+  if (bmi == null) return const ['lose', 'maintain', 'gain'];
+  if (bmi < 18.5) return const ['maintain', 'gain'];
+  if (bmi >= 23) return const ['lose'];
+  return const ['lose', 'maintain', 'gain'];
 }
 
 void showSnack(BuildContext context, String message, {bool error = false}) {

@@ -112,7 +112,7 @@ class ApiClient {
   Future<Map<String, dynamic>> updateProfile(Map<String, dynamic> fields) async =>
       Map<String, dynamic>.from(await put('/api/profile', fields));
 
-  /// {bmr, tdee, daily_calories} ยังไม่บันทึก
+  /// {bmr, tdee, daily_calories, bmi, allowed_goals, expected_kg_per_week, expected_kg_per_month} ยังไม่บันทึก
   Future<Map<String, dynamic>> previewRequirement(Map<String, dynamic> fields) async =>
       Map<String, dynamic>.from(await post('/api/profile/preview', fields));
 
@@ -161,9 +161,28 @@ class ApiClient {
     return (data as List).map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
+  // ---------- ออกกำลังกาย ----------
+
+  /// [{key, name_th, met, compendium_code}]
+  Future<List<Map<String, dynamic>>> exerciseActivities() async {
+    final data = await get('/api/exercise/activities');
+    return (data as List).map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  /// บันทึกการออกกำลังกาย คืนรายการที่บันทึก มี calories_burned
+  Future<Map<String, dynamic>> createExercise(String activity, int minutes) async =>
+      Map<String, dynamic>.from(await post('/api/exercise', {'activity': activity, 'minutes': minutes}));
+
+  /// {items: [...], total_burned}
+  Future<Map<String, dynamic>> todayExercises() async =>
+      Map<String, dynamic>.from(await get('/api/exercise/today'));
+
+  Future<void> deleteExercise(int id) =>
+      _send(http.delete(_uri('/api/exercise/$id'), headers: _headers(json: false)));
+
   // ---------- Dashboard / น้ำหนัก ----------
 
-  /// {goal, alerts: [{level, code, title, detail}], last7: [{date, calories}]}
+  /// {goal, alerts: [{level, code, title, detail}], last7: [{date, calories (สุทธิ), eaten, burned}]}
   Future<Map<String, dynamic>> dashboardAlerts() async =>
       Map<String, dynamic>.from(await get('/api/dashboard/alerts'));
 
